@@ -111,9 +111,9 @@ public class DlcCli {
                 if (trimmed.toLowerCase().startsWith("/install ")) {
                     String slug = trimmed.substring(9).trim();
                     if (slug.isBlank()) {
-                        System.out.println(ANSI_YELLOW + "Usage: /install <skill-name>" + ANSI_RESET);
+                        System.out.println(ANSI_YELLOW + "用法: /install <技能名称>" + ANSI_RESET);
                     } else {
-                        System.out.println(ANSI_DIM + "Installing " + slug + " from ClawHub..." + ANSI_RESET);
+                        System.out.println(ANSI_DIM + "正在从 ClawHub 安装 " + slug + "..." + ANSI_RESET);
                         System.out.println(SkillInstaller.install(slug));
                     }
                     continue;
@@ -121,7 +121,7 @@ public class DlcCli {
                 if (trimmed.toLowerCase().startsWith("/uninstall ")) {
                     String slug = trimmed.substring(11).trim();
                     if (slug.isBlank()) {
-                        System.out.println(ANSI_YELLOW + "Usage: /uninstall <skill-name>" + ANSI_RESET);
+                        System.out.println(ANSI_YELLOW + "用法: /uninstall <技能名称>" + ANSI_RESET);
                     } else {
                         System.out.println(SkillInstaller.uninstall(slug));
                     }

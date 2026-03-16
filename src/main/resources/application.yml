@@ -20,12 +20,13 @@ dlc:
   max-tool-output-chars: ${DLC_MAX_OUTPUT:30000}
   channels:
     wecom:
-      corp-id: ${DLC_WECOM_CORP_ID:aib8eA81OqR6qnaqNE}
-      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrLkRRVbjEztF5k}
+      enabled: ${DLC_WECOM_ENABLED:false}
+      corp-id: ${DLC_WECOM_CORP_ID:aib8eA81OskeqnaqNE}
+      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrLlRRVbjEztF5k}
 
 logging:
   level:
     root: ERROR
     com.dlchm.dlc: ERROR
-    com.dlchm.dlc.channel.wecom: ERROR
+    com.dlchm.dlc.channel.wecom: INFO
     org.springframework: ERROR

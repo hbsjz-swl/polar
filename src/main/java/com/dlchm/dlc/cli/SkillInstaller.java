@@ -11,6 +11,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -39,7 +45,7 @@ public class SkillInstaller {
         slug = slug.trim().toLowerCase().replaceAll("\\s+", "-")
                 .replaceAll("[^a-z0-9._-]", "");
         if (slug.isEmpty()) {
-            return "Invalid skill name.";
+            return "无效的技能名称。";
         }
 
         try {
@@ -48,15 +54,15 @@ public class SkillInstaller {
             HttpResponse<byte[]> response = downloadWithRetry(url);
 
             if (response.statusCode() == 404) {
-                return "Skill not found: " + slug;
+                return "未找到技能: " + slug;
             }
             if (response.statusCode() != 200) {
-                return "Download failed (HTTP " + response.statusCode() + ")";
+                return "下载失败 (HTTP " + response.statusCode() + ")";
             }
 
             byte[] zipBytes = response.body();
             if (zipBytes.length == 0) {
-                return "Download failed: empty response";
+                return "下载失败: 响应为空";
             }
 
             // 解压到 ~/.dlc/skills/<slug>/
@@ -87,18 +93,29 @@ public class SkillInstaller {
             }
 
             if (fileCount == 0) {
-                return "Download succeeded but ZIP was empty";
+                return "下载成功但 ZIP 为空";
             }
 
             // 验证 SKILL.md 存在
             boolean hasSkillMd = Files.exists(skillDir.resolve("SKILL.md"));
-            return "Installed: " + slug + " (" + fileCount + " files)"
-                    + (hasSkillMd ? "" : " [warning: SKILL.md not found]")
-                    + "\nLocation: " + skillDir
-                    + "\nRestart DLC to load the new skill.";
+            StringBuilder result = new StringBuilder();
+            result.append("已安装: ").append(slug).append(" (").append(fileCount).append(" 个文件)");
+            if (!hasSkillMd) result.append(" [警告: 未找到 SKILL.md]");
+            result.append("\n位置: ").append(skillDir);
+
+            // 检测外部依赖
+            if (hasSkillMd) {
+                String depHints = detectDependencies(skillDir.resolve("SKILL.md"));
+                if (!depHints.isEmpty()) {
+                    result.append("\n\n").append(depHints);
+                }
+            }
+
+            result.append("\n重启 DLC 后生效。");
+            return result.toString();
 
         } catch (IOException | InterruptedException e) {
-            return "Install failed: " + e.getMessage();
+            return "安装失败: " + e.getMessage();
         }
     }
 
@@ -108,13 +125,13 @@ public class SkillInstaller {
     public static String uninstall(String slug) {
         Path skillDir = SKILLS_DIR.resolve(slug);
         if (!Files.isDirectory(skillDir)) {
-            return "Skill not found locally: " + slug;
+            return "未找到本地技能: " + slug;
         }
         try {
             deleteRecursively(skillDir);
-            return "Uninstalled: " + slug + "\nRestart DLC to apply.";
+            return "已卸载: " + slug + "\n重启 DLC 后生效。";
         } catch (IOException e) {
-            return "Uninstall failed: " + e.getMessage();
+            return "卸载失败: " + e.getMessage();
         }
     }
 
@@ -123,7 +140,7 @@ public class SkillInstaller {
      */
     public static String listInstalled() {
         if (!Files.isDirectory(SKILLS_DIR)) {
-            return "No local skills installed.";
+            return "暂无已安装的本地技能。";
         }
         try (var dirs = Files.list(SKILLS_DIR)) {
             var installed = dirs
@@ -133,15 +150,93 @@ public class SkillInstaller {
                     .sorted()
                     .toList();
             if (installed.isEmpty()) {
-                return "No local skills installed.";
+                return "暂无已安装的本地技能。";
             }
-            StringBuilder sb = new StringBuilder("Installed skills:\n");
+            StringBuilder sb = new StringBuilder("已安装的技能:\n");
             for (String name : installed) {
                 sb.append("  - ").append(name).append("\n");
             }
             return sb.toString();
         } catch (IOException e) {
-            return "Failed to list skills: " + e.getMessage();
+            return "列出技能失败: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 从 SKILL.md 中检测外部工具依赖，检查本机是否已安装。
+     */
+    private static String detectDependencies(Path skillMd) {
+        try {
+            String content = Files.readString(skillMd);
+
+            // 收集安装命令和对应的工具名
+            // key=工具命令, value=安装命令
+            Map<String, String> deps = new LinkedHashMap<>();
+
+            // npm install -g <package>
+            Matcher npm = Pattern.compile("npm install(?:\\s+-g)?\\s+([\\w@/.:-]+)").matcher(content);
+            while (npm.find()) {
+                String pkg = npm.group(1);
+                deps.put(pkg, "npm install -g " + pkg);
+            }
+
+            // pip install <package>
+            Matcher pip = Pattern.compile("pip3?\\s+install\\s+([\\w-]+)").matcher(content);
+            while (pip.find()) {
+                String pkg = pip.group(1);
+                deps.put(pkg, "pip install " + pkg);
+            }
+
+            // brew install <package>
+            Matcher brew = Pattern.compile("brew install\\s+([\\w-]+)").matcher(content);
+            while (brew.find()) {
+                String pkg = brew.group(1);
+                deps.put(pkg, "brew install " + pkg);
+            }
+
+            if (deps.isEmpty()) return "";
+
+            // 检查哪些工具缺失
+            List<String> missing = new ArrayList<>();
+            List<String> installed = new ArrayList<>();
+            for (Map.Entry<String, String> entry : deps.entrySet()) {
+                String tool = entry.getKey();
+                // 取包名中最后一段作为命令名（如 @anthropic/tool -> tool）
+                String cmd = tool.contains("/") ? tool.substring(tool.lastIndexOf('/') + 1) : tool;
+                if (isCommandAvailable(cmd)) {
+                    installed.add(tool + " ✓");
+                } else {
+                    missing.add(entry.getValue());
+                }
+            }
+
+            if (missing.isEmpty()) {
+                return "依赖检测: 全部满足 (" + String.join(", ", installed) + ")";
+            }
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("⚠ 检测到缺少以下依赖，请手动安装:\n");
+            for (String cmd : missing) {
+                sb.append("  $ ").append(cmd).append("\n");
+            }
+            if (!installed.isEmpty()) {
+                sb.append("已安装: ").append(String.join(", ", installed));
+            }
+            return sb.toString();
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    private static boolean isCommandAvailable(String command) {
+        try {
+            Process proc = new ProcessBuilder("which", command)
+                    .redirectErrorStream(true)
+                    .start();
+            int exitCode = proc.waitFor();
+            return exitCode == 0;
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -166,7 +261,7 @@ public class SkillInstaller {
                     .orElse(30);
 
             if (attempt < MAX_RETRIES) {
-                System.out.println("  Rate limited, waiting " + waitSeconds + "s... ("
+                System.out.println("  请求频率受限，等待 " + waitSeconds + " 秒... ("
                         + (attempt + 1) + "/" + MAX_RETRIES + ")");
                 Thread.sleep(waitSeconds * 1000L);
             }

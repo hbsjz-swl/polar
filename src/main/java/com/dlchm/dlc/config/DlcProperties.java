@@ -51,17 +51,21 @@ public class DlcProperties {
     }
 
     /**
-     * 企微配置：配置了 corp-id + secret 就自动连接，无需 enabled 开关。
+     * 企微配置：enabled=true 且配置了 corp-id + secret 时自动连接。
      */
     public static class WeComConfig {
+        private boolean enabled = true;
         private String corpId = "";
         private String secret = "";
 
         public boolean isConfigured() {
-            return corpId != null && !corpId.isBlank()
+            return enabled
+                    && corpId != null && !corpId.isBlank()
                     && secret != null && !secret.isBlank();
         }
 
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getCorpId() { return corpId; }
         public void setCorpId(String corpId) { this.corpId = corpId; }
         public String getSecret() { return secret; }
