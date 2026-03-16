@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import reactor.core.Disposable;
 
 /**
  * 企业微信智能机器人 Channel（WebSocket 长连接模式）。
@@ -46,6 +47,7 @@ public class WeComChannel implements Channel {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final ConcurrentHashMap<String, Session> userSessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Disposable> activeStreams = new ConcurrentHashMap<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, r -> {
         Thread t = new Thread(r, "wecom-channel");
@@ -213,15 +215,22 @@ public class WeComChannel implements Channel {
         Session session = userSessions.computeIfAbsent(userId,
                 k -> sessionManager.create("wecom", userId));
 
+        // 取消该用户正在进行的上一个流式回复
+        Disposable prev = activeStreams.remove(userId);
+        if (prev != null && !prev.isDisposed()) {
+            log.info("WeCom cancelling previous stream for user {}", userId);
+            prev.dispose();
+        }
+
         // 异步处理并流式回复
-        processAndReply(session, reqId, content);
+        processAndReply(session, reqId, content, userId);
     }
 
-    private void processAndReply(Session session, String reqId, String userMessage) {
+    private void processAndReply(Session session, String reqId, String userMessage, String userId) {
         String streamId = WeComApiClient.uuid();
         StringBuilder accumulated = new StringBuilder();
 
-        agent.stream(session, userMessage)
+        Disposable disposable = agent.stream(session, userMessage)
                 .filter(event -> event.type() == StreamEvent.Type.TOKEN)
                 .map(StreamEvent::data)
                 .buffer(java.time.Duration.ofMillis(STREAM_THROTTLE_MS))
@@ -233,12 +242,18 @@ public class WeComChannel implements Channel {
                             sendStreamReply(reqId, streamId, accumulated.toString(), false);
                         },
                         error -> {
+                            activeStreams.remove(userId);
                             log.error("WeCom agent error: {}", error.getMessage());
                             accumulated.append("\n\n[Error: ").append(error.getMessage()).append("]");
                             sendStreamReply(reqId, streamId, accumulated.toString(), true);
                         },
-                        () -> sendStreamReply(reqId, streamId, accumulated.toString(), true)
+                        () -> {
+                            activeStreams.remove(userId);
+                            sendStreamReply(reqId, streamId, accumulated.toString(), true);
+                        }
                 );
+
+        activeStreams.put(userId, disposable);
     }
 
     private void sendStreamReply(String reqId, String streamId, String content, boolean finish) {
