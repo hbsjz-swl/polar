@@ -288,11 +288,24 @@ public class CodingAgent {
 
             // Execute tools
             for (ToolCallAccumulator acc : accumulators.values()) {
+                // 验证和修复工具参数 JSON
+                String argsStr = acc.arguments.toString().trim();
+                argsStr = fixToolArguments(argsStr);
+                acc.arguments.setLength(0);
+                acc.arguments.append(argsStr);
+
+                // 同步修复 assistantMsg 中 tool_calls 的 arguments
+                for (JsonNode tcNode : assistantMsg.path("tool_calls")) {
+                    if (acc.id != null && acc.id.equals(tcNode.path("id").asText())) {
+                        ((ObjectNode) tcNode.path("function")).put("arguments", argsStr);
+                    }
+                }
+
                 ToolCallback callback = toolMap.get(acc.name);
                 String result;
                 if (callback != null) {
                     try {
-                        result = callback.call(acc.arguments.toString());
+                        result = callback.call(argsStr);
                     } catch (Exception e) {
                         result = "Error executing " + acc.name + ": " + e.getMessage();
                     }
@@ -350,6 +363,57 @@ public class CodingAgent {
             tools.add(tool);
         }
         return tools;
+    }
+
+    /**
+     * 修复小模型生成的不合规工具参数 JSON。
+     * 常见问题：空字符串、非 JSON 文本、缺少大括号、尾部逗号、单引号等。
+     */
+    private String fixToolArguments(String args) {
+        if (args == null || args.isEmpty()) {
+            return "{}";
+        }
+
+        // 去掉可能的 markdown 代码块包裹
+        if (args.startsWith("```")) {
+            args = args.replaceAll("^```\\w*\\n?", "").replaceAll("\\n?```$", "").trim();
+        }
+
+        // 尝试直接解析
+        try {
+            objectMapper.readTree(args);
+            return args;
+        } catch (Exception ignored) {}
+
+        // 修复单引号 → 双引号
+        String fixed = args.replace('\'', '"');
+        try {
+            objectMapper.readTree(fixed);
+            return fixed;
+        } catch (Exception ignored) {}
+
+        // 去掉尾部逗号 (trailing comma before })
+        fixed = fixed.replaceAll(",\\s*}", "}").replaceAll(",\\s*]", "]");
+        try {
+            objectMapper.readTree(fixed);
+            return fixed;
+        } catch (Exception ignored) {}
+
+        // 补全缺失的大括号
+        if (!fixed.startsWith("{") && !fixed.startsWith("[")) {
+            fixed = "{" + fixed;
+        }
+        if (fixed.startsWith("{") && !fixed.endsWith("}")) {
+            fixed = fixed + "}";
+        }
+        try {
+            objectMapper.readTree(fixed);
+            return fixed;
+        } catch (Exception ignored) {}
+
+        // 实在无法修复，返回空对象
+        log.warn("Cannot fix tool arguments, using empty: {}", args);
+        return "{}";
     }
 
     private String extractErrorMessage(String responseBody) {

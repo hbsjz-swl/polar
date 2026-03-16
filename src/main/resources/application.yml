@@ -21,8 +21,8 @@ dlc:
   channels:
     wecom:
       enabled: ${DLC_WECOM_ENABLED:false}
-      corp-id: ${DLC_WECOM_CORP_ID:aib8eA81OskeqnaqNE}
-      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrLlRRVbjEztF5k}
+      corp-id: ${DLC_WECOM_CORP_ID:aib8eA81aqNE}
+      secret: ${DLC_WECOM_SECRET:JbzFFviPX6NlRRVbjEztF5k}
 
 logging:
   level:
