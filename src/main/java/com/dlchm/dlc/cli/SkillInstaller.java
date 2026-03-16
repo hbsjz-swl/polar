@@ -3,9 +3,11 @@ package com.dlchm.dlc.cli;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -33,9 +35,16 @@ public class SkillInstaller {
      * 安装技能。返回安装结果描述。
      */
     public static String install(String slug) {
+        // 规范化 slug：去空格、转小写、用连字符连接
+        slug = slug.trim().toLowerCase().replaceAll("\\s+", "-")
+                .replaceAll("[^a-z0-9._-]", "");
+        if (slug.isEmpty()) {
+            return "Invalid skill name.";
+        }
+
         try {
             // 下载 ZIP（遇到 429 自动等待重试）
-            String url = CLAWHUB_API + "?slug=" + slug;
+            String url = CLAWHUB_API + "?slug=" + URLEncoder.encode(slug, StandardCharsets.UTF_8);
             HttpResponse<byte[]> response = downloadWithRetry(url);
 
             if (response.statusCode() == 404) {
