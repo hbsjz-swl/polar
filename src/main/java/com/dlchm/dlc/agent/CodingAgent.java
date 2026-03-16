@@ -187,7 +187,7 @@ public class CodingAgent {
             requestBody.put("temperature", 0.1);
             requestBody.put("stream", true);
 
-            String requestJson = objectMapper.writeValueAsString(requestBody);
+            String requestJson = sanitizeJson(objectMapper.writeValueAsString(requestBody));
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/v1/chat/completions"))
                     .header("Content-Type", "application/json")
@@ -206,9 +206,9 @@ public class CodingAgent {
                 }
                 String errorMsg = extractErrorMessage(errorBody);
 
-                // 400 错误且不是第一轮 → 可能是上轮工具调用参数导致，回退重试
-                if (response.statusCode() == 400 && i > 0) {
-                    log.warn("API 400 error after tool call, rolling back tool round: {}", errorMsg);
+                // 400/500 错误且不是第一轮 → 可能是上轮工具调用参数或内容导致，回退重试
+                if ((response.statusCode() == 400 || response.statusCode() == 500) && i > 0) {
+                    log.warn("API {} error after tool call, rolling back: {}", response.statusCode(), errorMsg);
                     // 移除上一轮的 assistant(tool_calls) + tool results
                     while (messages.size() > 0) {
                         JsonNode last = messages.get(messages.size() - 1);
@@ -432,6 +432,39 @@ public class CodingAgent {
         // 实在无法修复，返回空对象
         log.warn("Cannot fix tool arguments, using empty: {}", args);
         return "{}";
+    }
+
+    /**
+     * 清理 JSON 字符串中的无效转义序列。
+     * Ollama (Go) 的 JSON 解析器比 Java 更严格，不允许 \+非法字符（如 \空格、\: 等）。
+     */
+    private String sanitizeJson(String json) {
+        // 匹配 JSON 字符串内部的无效转义: \ 后面不是 " \ / b f n r t u
+        // 将孤立的 \ 替换为 \\
+        StringBuilder sb = new StringBuilder(json.length());
+        boolean inString = false;
+        for (int i = 0; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '"' && (i == 0 || json.charAt(i - 1) != '\\')) {
+                inString = !inString;
+                sb.append(c);
+            } else if (inString && c == '\\') {
+                if (i + 1 < json.length()) {
+                    char next = json.charAt(i + 1);
+                    if (next == '"' || next == '\\' || next == '/' || next == 'b'
+                            || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == 'u') {
+                        sb.append(c); // 合法转义，保留
+                    } else {
+                        sb.append('\\').append('\\'); // 非法转义，双写反斜杠
+                    }
+                } else {
+                    sb.append('\\').append('\\');
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     private String extractErrorMessage(String responseBody) {
