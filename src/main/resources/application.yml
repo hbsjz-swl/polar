@@ -20,8 +20,8 @@ dlc:
   max-tool-output-chars: ${DLC_MAX_OUTPUT:30000}
   channels:
     wecom:
-      corp-id: ${DLC_WECOM_CORP_ID:aib8efuHskeqnaqNE}
-      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrLkviPX6NlRRVbjEztF5k}
+      corp-id: ${DLC_WECOM_CORP_ID:aib8eA81OnaqNE}
+      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrLRRVbjEztF5k}
 
 logging:
   level:

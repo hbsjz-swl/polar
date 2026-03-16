@@ -1,4 +1,4 @@
-# DLC - Local AI Coding Agent
+# DLC - Local AI Cowork Agent
 
 本地 AI 编程助手，在终端中通过自然语言操作代码。所有文件操作在本地执行，仅 LLM 推理通过 API 调用。
 
