@@ -2,10 +2,6 @@
 """
 Browser CDP - Connect to an existing Chrome browser via Chrome DevTools Protocol.
 
-Unlike analyze_page.py / browser_action.py which launch a NEW browser each time,
-this script connects to an ALREADY RUNNING Chrome instance via CDP.
-The browser stays open between calls, preserving login state, cookies, etc.
-
 Prerequisites:
     Chrome must be running with: --remote-debugging-port=9222
 
@@ -51,7 +47,6 @@ def get_page(browser, tab_index=0):
         pages.extend(ctx.pages)
 
     if not pages:
-        # Create a new page if none exist
         if browser.contexts:
             return browser.contexts[0].new_page()
         return None
@@ -62,11 +57,153 @@ def get_page(browser, tab_index=0):
     return pages[tab_index]
 
 
+def get_selector(el):
+    """为元素生成可靠的 CSS 选择器。优先级: #id > [name] > [data-testid] > 文本选择器 > nth-child 路径。"""
+    try:
+        sel = el.evaluate("""el => {
+            // 1. id
+            if (el.id) return '#' + CSS.escape(el.id);
+
+            // 2. name 属性
+            const name = el.getAttribute('name');
+            if (name) {
+                const tag = el.tagName.toLowerCase();
+                const sel = tag + '[name="' + name + '"]';
+                if (document.querySelectorAll(sel).length === 1) return sel;
+            }
+
+            // 3. data-testid
+            const testId = el.getAttribute('data-testid') || el.getAttribute('data-test');
+            if (testId) return '[data-testid="' + testId + '"]';
+
+            // 4. aria-label
+            const ariaLabel = el.getAttribute('aria-label');
+            if (ariaLabel) {
+                const tag = el.tagName.toLowerCase();
+                const sel = tag + '[aria-label="' + ariaLabel + '"]';
+                if (document.querySelectorAll(sel).length === 1) return sel;
+            }
+
+            // 5. placeholder
+            const placeholder = el.getAttribute('placeholder');
+            if (placeholder) {
+                const tag = el.tagName.toLowerCase();
+                const sel = tag + '[placeholder="' + placeholder + '"]';
+                if (document.querySelectorAll(sel).length === 1) return sel;
+            }
+
+            // 6. 唯一 class 组合
+            if (el.classList.length > 0) {
+                const tag = el.tagName.toLowerCase();
+                const cls = '.' + Array.from(el.classList).map(c => CSS.escape(c)).join('.');
+                const sel = tag + cls;
+                if (document.querySelectorAll(sel).length === 1) return sel;
+            }
+
+            // 7. nth-child 路径 (最后手段)
+            const parts = [];
+            let node = el;
+            while (node && node !== document.body && parts.length < 4) {
+                const tag = node.tagName.toLowerCase();
+                if (node.id) {
+                    parts.unshift('#' + CSS.escape(node.id));
+                    break;
+                }
+                const parent = node.parentElement;
+                if (parent) {
+                    const siblings = Array.from(parent.children).filter(c => c.tagName === node.tagName);
+                    if (siblings.length > 1) {
+                        const idx = siblings.indexOf(node) + 1;
+                        parts.unshift(tag + ':nth-child(' + idx + ')');
+                    } else {
+                        parts.unshift(tag);
+                    }
+                } else {
+                    parts.unshift(tag);
+                }
+                node = parent;
+            }
+            return parts.join(' > ');
+        }""")
+        return sel
+    except:
+        return None
+
+
 def view_page(page, screenshot_path=None):
-    """Analyze current page structure."""
+    """Analyze current page structure with actionable selectors."""
     info = {"url": page.url, "title": page.title()}
 
-    # Headings
+    # ===== 可交互元素（统一收集，带选择器）=====
+    interactive = []
+
+    # 输入框、文本域、下拉框
+    for el in page.locator("input, textarea, select").all():
+        try:
+            if not el.is_visible():
+                continue
+            itype = el.get_attribute("type") or "text"
+            if itype in ("hidden",):
+                continue
+            tag = el.evaluate("el => el.tagName.toLowerCase()")
+            selector = get_selector(el)
+            if not selector:
+                continue
+            label = (
+                el.get_attribute("placeholder")
+                or el.get_attribute("aria-label")
+                or el.get_attribute("name")
+                or el.get_attribute("id")
+                or ""
+            )
+            value = ""
+            try:
+                value = el.input_value()
+            except:
+                pass
+            item = {"tag": tag, "type": itype, "label": label, "selector": selector}
+            if value:
+                item["value"] = value[:100]
+            interactive.append(item)
+        except:
+            pass
+
+    # 按钮
+    for el in page.locator("button, [role='button'], input[type='submit'], input[type='button']").all():
+        try:
+            if not el.is_visible():
+                continue
+            text = el.inner_text().strip()
+            if not text:
+                text = el.get_attribute("value") or el.get_attribute("aria-label") or ""
+            if not text or len(text) > 80:
+                continue
+            selector = get_selector(el)
+            if not selector:
+                continue
+            interactive.append({"tag": "button", "text": text, "selector": selector})
+        except:
+            pass
+
+    info["interactive_elements"] = interactive[:60]
+
+    # ===== 链接 =====
+    links = []
+    for a in page.locator("a[href]").all():
+        try:
+            if not a.is_visible():
+                continue
+            text = a.inner_text().strip()
+            href = a.get_attribute("href") or ""
+            if not text or len(text) > 120:
+                continue
+            selector = get_selector(a)
+            links.append({"text": text, "href": href, "selector": selector})
+        except:
+            pass
+    info["links"] = links[:50]
+
+    # ===== 标题 =====
     headings = []
     for h in page.locator("h1, h2, h3, h4").all():
         try:
@@ -79,118 +216,34 @@ def view_page(page, screenshot_path=None):
             pass
     info["headings"] = headings
 
-    # Navigation links
-    nav = []
-    for a in page.locator("nav a, header a, [role='navigation'] a").all():
-        try:
-            if a.is_visible():
-                text = a.inner_text().strip()
-                href = a.get_attribute("href") or ""
-                if text:
-                    nav.append({"text": text, "href": href})
-        except:
-            pass
-    info["navigation"] = nav[:20]
-
-    # Forms
+    # ===== 表单概览 =====
     forms = []
     for form in page.locator("form").all():
         try:
-            fields = []
-            for inp in form.locator("input, textarea, select").all():
-                try:
-                    if not inp.is_visible():
-                        continue
-                except:
-                    continue
-                itype = inp.get_attribute("type") or "text"
-                if itype in ("hidden",):
-                    continue
-                name = (
-                    inp.get_attribute("name")
-                    or inp.get_attribute("id")
-                    or inp.get_attribute("placeholder")
-                    or ""
-                )
-                fields.append({"name": name, "type": itype})
-            btns = []
-            for b in form.locator("button, input[type='submit']").all():
-                try:
-                    btns.append(
-                        b.inner_text().strip()
-                        or b.get_attribute("value")
-                        or "submit"
-                    )
-                except:
-                    pass
-            forms.append({"fields": fields, "buttons": btns})
+            selector = get_selector(form)
+            action = form.get_attribute("action") or ""
+            method = form.get_attribute("method") or "get"
+            forms.append({"selector": selector, "action": action, "method": method})
         except:
             pass
-    info["forms"] = forms
+    info["forms"] = forms[:10]
 
-    # Buttons (outside forms)
-    buttons = []
-    seen = set()
-    for el in page.locator(
-        "button, [role='button'], a.btn, .btn, input[type='button']"
-    ).all():
-        try:
-            if el.is_visible():
-                text = el.inner_text().strip()
-                if text and len(text) < 80 and text not in seen:
-                    tag = el.evaluate("el => el.tagName")
-                    buttons.append({"text": text, "tag": tag})
-                    seen.add(text)
-        except:
-            pass
-    info["buttons"] = buttons[:30]
-
-    # All visible links
-    links = []
-    for a in page.locator("a[href]").all():
-        try:
-            if a.is_visible():
-                text = a.inner_text().strip()
-                href = a.get_attribute("href") or ""
-                if text and len(text) < 120:
-                    links.append({"text": text, "href": href})
-        except:
-            pass
-    info["links"] = links[:50]
-
-    # Images with alt text
-    images = []
-    for img in page.locator("img[alt]").all():
-        try:
-            if img.is_visible():
-                alt = img.get_attribute("alt") or ""
-                src = img.get_attribute("src") or ""
-                if alt:
-                    images.append({"alt": alt, "src": src[:200]})
-        except:
-            pass
-    info["images"] = images[:20]
-
-    # Tables
+    # ===== 表格 =====
     tables = []
     for table in page.locator("table").all():
         try:
             if table.is_visible():
-                headers = [
-                    th.inner_text().strip()
-                    for th in table.locator("th").all()
-                ]
+                headers = [th.inner_text().strip() for th in table.locator("th").all()]
                 row_count = len(table.locator("tr").all())
-                tables.append({"headers": headers, "rows": row_count})
+                selector = get_selector(table)
+                tables.append({"headers": headers, "rows": row_count, "selector": selector})
         except:
             pass
     info["tables"] = tables[:10]
 
-    # Main text content (abbreviated)
+    # ===== 主要文本内容 =====
     try:
-        main_el = page.locator(
-            "main, article, [role='main'], .content, #content"
-        ).first
+        main_el = page.locator("main, article, [role='main'], .content, #content").first
         if main_el.is_visible():
             info["main_text"] = main_el.inner_text()[:3000]
         else:
@@ -201,13 +254,16 @@ def view_page(page, screenshot_path=None):
         except:
             info["main_text"] = ""
 
-    # Screenshot
+    # ===== 截图 =====
     if screenshot_path:
         try:
             page.screenshot(path=screenshot_path, full_page=True)
             info["screenshot"] = screenshot_path
         except Exception as e:
             info["screenshot_error"] = str(e)
+
+    # ===== 使用提示 =====
+    info["_hint"] = "使用 selector 字段的值作为 browser_action 的 selector 参数。例如: {\"action\":\"click\",\"selector\":\"#search-btn\"}"
 
     return info
 
