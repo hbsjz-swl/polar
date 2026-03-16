@@ -27,20 +27,16 @@ public class SkillInstaller {
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
 
+    private static final int MAX_RETRIES = 3;
+
     /**
      * 安装技能。返回安装结果描述。
      */
     public static String install(String slug) {
         try {
-            // 下载 ZIP
+            // 下载 ZIP（遇到 429 自动等待重试）
             String url = CLAWHUB_API + "?slug=" + slug;
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(30))
-                    .GET()
-                    .build();
-
-            HttpResponse<byte[]> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> response = downloadWithRetry(url);
 
             if (response.statusCode() == 404) {
                 return "Skill not found: " + slug;
@@ -138,6 +134,41 @@ public class SkillInstaller {
         } catch (IOException e) {
             return "Failed to list skills: " + e.getMessage();
         }
+    }
+
+    private static HttpResponse<byte[]> downloadWithRetry(String url) throws IOException, InterruptedException {
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(30))
+                    .GET()
+                    .build();
+
+            HttpResponse<byte[]> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofByteArray());
+
+            if (response.statusCode() != 429) {
+                return response;
+            }
+
+            // 从 retry-after 头读取等待秒数，默认 30 秒
+            int waitSeconds = response.headers()
+                    .firstValue("retry-after")
+                    .map(v -> { try { return Integer.parseInt(v); } catch (Exception e) { return 30; } })
+                    .orElse(30);
+
+            if (attempt < MAX_RETRIES) {
+                System.out.println("  Rate limited, waiting " + waitSeconds + "s... ("
+                        + (attempt + 1) + "/" + MAX_RETRIES + ")");
+                Thread.sleep(waitSeconds * 1000L);
+            }
+        }
+        // 最后一次仍然 429，返回该响应让调用方处理
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(30))
+                .GET()
+                .build();
+        return HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofByteArray());
     }
 
     private static void deleteRecursively(Path path) throws IOException {
