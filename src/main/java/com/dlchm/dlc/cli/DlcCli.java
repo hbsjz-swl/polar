@@ -35,7 +35,7 @@ public class DlcCli {
               ██║  ██║██║     ██║
               ██████╔╝███████╗╚██████╗
               ╚═════╝ ╚══════╝ ╚═════╝
-              Local AI Coding Agent
+              Local AI CorWork Agent
               蒂爱喜(北京)科技有限公司-石家庄AI项目组研发
             """;
 
