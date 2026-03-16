@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""
+Browser CDP - Connect to an existing Chrome browser via Chrome DevTools Protocol.
+
+Unlike analyze_page.py / browser_action.py which launch a NEW browser each time,
+this script connects to an ALREADY RUNNING Chrome instance via CDP.
+The browser stays open between calls, preserving login state, cookies, etc.
+
+Prerequisites:
+    Chrome must be running with: --remote-debugging-port=9222
+
+Usage:
+    python browser_cdp.py view [--cdp-url URL] [--tab N] [--screenshot PATH]
+    python browser_cdp.py action --actions JSON [--cdp-url URL] [--tab N] [--screenshot PATH]
+"""
+
+from playwright.sync_api import sync_playwright
+import argparse
+import json
+import sys
+
+
+DEFAULT_CDP_URL = "http://localhost:9222"
+
+
+def connect_browser(p, cdp_url):
+    """Connect to Chrome via CDP."""
+    try:
+        browser = p.chromium.connect_over_cdp(cdp_url)
+        return browser
+    except Exception as e:
+        error_msg = str(e)
+        if "connect" in error_msg.lower() or "refused" in error_msg.lower():
+            print(json.dumps({
+                "error": "无法连接到 Chrome。请先调用 browser_start 启动浏览器。",
+                "cdp_url": cdp_url,
+                "details": error_msg
+            }, ensure_ascii=False))
+        else:
+            print(json.dumps({
+                "error": f"CDP connection failed: {error_msg}",
+                "cdp_url": cdp_url
+            }, ensure_ascii=False))
+        sys.exit(1)
+
+
+def get_page(browser, tab_index=0):
+    """Get a page by tab index."""
+    pages = []
+    for ctx in browser.contexts:
+        pages.extend(ctx.pages)
+
+    if not pages:
+        # Create a new page if none exist
+        if browser.contexts:
+            return browser.contexts[0].new_page()
+        return None
+
+    if tab_index >= len(pages):
+        tab_index = len(pages) - 1
+
+    return pages[tab_index]
+
+
+def view_page(page, screenshot_path=None):
+    """Analyze current page structure."""
+    info = {"url": page.url, "title": page.title()}
+
+    # Headings
+    headings = []
+    for h in page.locator("h1, h2, h3, h4").all():
+        try:
+            if h.is_visible():
+                tag = h.evaluate("el => el.tagName")
+                text = h.inner_text().strip()
+                if text:
+                    headings.append(f"[{tag}] {text}")
+        except:
+            pass
+    info["headings"] = headings
+
+    # Navigation links
+    nav = []
+    for a in page.locator("nav a, header a, [role='navigation'] a").all():
+        try:
+            if a.is_visible():
+                text = a.inner_text().strip()
+                href = a.get_attribute("href") or ""
+                if text:
+                    nav.append({"text": text, "href": href})
+        except:
+            pass
+    info["navigation"] = nav[:20]
+
+    # Forms
+    forms = []
+    for form in page.locator("form").all():
+        try:
+            fields = []
+            for inp in form.locator("input, textarea, select").all():
+                try:
+                    if not inp.is_visible():
+                        continue
+                except:
+                    continue
+                itype = inp.get_attribute("type") or "text"
+                if itype in ("hidden",):
+                    continue
+                name = (
+                    inp.get_attribute("name")
+                    or inp.get_attribute("id")
+                    or inp.get_attribute("placeholder")
+                    or ""
+                )
+                fields.append({"name": name, "type": itype})
+            btns = []
+            for b in form.locator("button, input[type='submit']").all():
+                try:
+                    btns.append(
+                        b.inner_text().strip()
+                        or b.get_attribute("value")
+                        or "submit"
+                    )
+                except:
+                    pass
+            forms.append({"fields": fields, "buttons": btns})
+        except:
+            pass
+    info["forms"] = forms
+
+    # Buttons (outside forms)
+    buttons = []
+    seen = set()
+    for el in page.locator(
+        "button, [role='button'], a.btn, .btn, input[type='button']"
+    ).all():
+        try:
+            if el.is_visible():
+                text = el.inner_text().strip()
+                if text and len(text) < 80 and text not in seen:
+                    tag = el.evaluate("el => el.tagName")
+                    buttons.append({"text": text, "tag": tag})
+                    seen.add(text)
+        except:
+            pass
+    info["buttons"] = buttons[:30]
+
+    # All visible links
+    links = []
+    for a in page.locator("a[href]").all():
+        try:
+            if a.is_visible():
+                text = a.inner_text().strip()
+                href = a.get_attribute("href") or ""
+                if text and len(text) < 120:
+                    links.append({"text": text, "href": href})
+        except:
+            pass
+    info["links"] = links[:50]
+
+    # Images with alt text
+    images = []
+    for img in page.locator("img[alt]").all():
+        try:
+            if img.is_visible():
+                alt = img.get_attribute("alt") or ""
+                src = img.get_attribute("src") or ""
+                if alt:
+                    images.append({"alt": alt, "src": src[:200]})
+        except:
+            pass
+    info["images"] = images[:20]
+
+    # Tables
+    tables = []
+    for table in page.locator("table").all():
+        try:
+            if table.is_visible():
+                headers = [
+                    th.inner_text().strip()
+                    for th in table.locator("th").all()
+                ]
+                row_count = len(table.locator("tr").all())
+                tables.append({"headers": headers, "rows": row_count})
+        except:
+            pass
+    info["tables"] = tables[:10]
+
+    # Main text content (abbreviated)
+    try:
+        main_el = page.locator(
+            "main, article, [role='main'], .content, #content"
+        ).first
+        if main_el.is_visible():
+            info["main_text"] = main_el.inner_text()[:3000]
+        else:
+            raise Exception()
+    except:
+        try:
+            info["main_text"] = page.locator("body").inner_text()[:3000]
+        except:
+            info["main_text"] = ""
+
+    # Screenshot
+    if screenshot_path:
+        try:
+            page.screenshot(path=screenshot_path, full_page=True)
+            info["screenshot"] = screenshot_path
+        except Exception as e:
+            info["screenshot_error"] = str(e)
+
+    return info
+
+
+def perform_actions(page, actions, screenshot_path=None):
+    """Perform actions on the page."""
+    results = []
+    console_logs = []
+    page.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text}"))
+
+    for i, act in enumerate(actions):
+        action = act.get("action", "")
+        selector = act.get("selector", "")
+        step = {"step": i + 1, "action": action}
+
+        try:
+            if action == "goto":
+                url = act.get("url", selector)
+                page.goto(url, timeout=30000)
+                page.wait_for_load_state("networkidle", timeout=15000)
+                step["result"] = f"Navigated to: {page.url}"
+
+            elif action == "click":
+                page.locator(selector).click(timeout=5000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except:
+                    pass
+                step["result"] = f"Clicked: {selector}"
+                step["new_url"] = page.url
+
+            elif action == "fill":
+                page.locator(selector).fill(act.get("value", ""))
+                step["result"] = f"Filled: {selector}"
+
+            elif action == "select":
+                page.locator(selector).select_option(act.get("value", ""))
+                step["result"] = f"Selected: {act.get('value', '')}"
+
+            elif action == "check":
+                page.locator(selector).check()
+                step["result"] = f"Checked: {selector}"
+
+            elif action == "uncheck":
+                page.locator(selector).uncheck()
+                step["result"] = f"Unchecked: {selector}"
+
+            elif action == "hover":
+                page.locator(selector).hover()
+                step["result"] = f"Hovered: {selector}"
+
+            elif action == "scroll":
+                direction = act.get("direction", "down")
+                amount = act.get("amount", 500)
+                delta = amount if direction == "down" else -amount
+                page.mouse.wheel(0, delta)
+                page.wait_for_timeout(500)
+                step["result"] = f"Scrolled {direction} by {amount}px"
+
+            elif action == "wait":
+                t = act.get("timeout", 5000)
+                page.locator(selector).wait_for(timeout=t)
+                step["result"] = f"Found: {selector}"
+
+            elif action == "screenshot":
+                path = act.get("path", f"/tmp/step_{i + 1}.png")
+                page.screenshot(path=path, full_page=act.get("full_page", True))
+                step["result"] = f"Screenshot saved: {path}"
+
+            elif action == "get_text":
+                text = page.locator(selector).inner_text()
+                step["result"] = text[:3000]
+
+            elif action == "get_attr":
+                attr = act.get("attr", "href")
+                val = page.locator(selector).get_attribute(attr)
+                step["result"] = val
+
+            elif action == "evaluate":
+                val = page.evaluate(act.get("script", ""))
+                step["result"] = str(val)[:3000]
+
+            elif action == "press":
+                key = act.get("key", "Enter")
+                if selector:
+                    page.locator(selector).press(key)
+                else:
+                    page.keyboard.press(key)
+                step["result"] = f"Pressed: {key}"
+
+            else:
+                step["error"] = f"Unknown action: {action}"
+
+        except Exception as e:
+            step["error"] = str(e)
+
+        results.append(step)
+
+    # Final state
+    final = {
+        "final_url": page.url,
+        "final_title": page.title(),
+    }
+
+    if screenshot_path:
+        try:
+            page.screenshot(path=screenshot_path, full_page=True)
+            final["screenshot"] = screenshot_path
+        except Exception as e:
+            final["screenshot_error"] = str(e)
+
+    if console_logs:
+        final["console_logs"] = console_logs[-20:]
+
+    return {"actions": results, "final": final}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Browser CDP operations")
+    parser.add_argument("mode", choices=["view", "action"],
+                        help="Mode: view (analyze page) or action (perform actions)")
+    parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL,
+                        help=f"CDP URL (default: {DEFAULT_CDP_URL})")
+    parser.add_argument("--tab", type=int, default=0,
+                        help="Tab index to operate on (default: 0)")
+    parser.add_argument("--actions", help="JSON array of actions (for action mode)")
+    parser.add_argument("--screenshot", help="Save screenshot to path")
+    args = parser.parse_args()
+
+    with sync_playwright() as p:
+        browser = connect_browser(p, args.cdp_url)
+
+        try:
+            page = get_page(browser, args.tab)
+            if page is None:
+                print(json.dumps({"error": "No pages available in browser"}))
+                sys.exit(1)
+
+            if args.mode == "view":
+                result = view_page(page, args.screenshot)
+
+            elif args.mode == "action":
+                if not args.actions:
+                    print(json.dumps({"error": "--actions is required for action mode"}))
+                    sys.exit(1)
+                try:
+                    actions = json.loads(args.actions)
+                except json.JSONDecodeError as e:
+                    print(json.dumps({"error": f"Invalid JSON: {e}"}))
+                    sys.exit(1)
+                result = perform_actions(page, actions, args.screenshot)
+
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+        finally:
+            browser.close()

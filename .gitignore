@@ -1,0 +1,28 @@
+# Build
+target/
+*.jar
+!bin/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (may contain API keys)
+config.properties
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# DLC runtime
+.dlc/
+
+# Claude Code
+.claude/

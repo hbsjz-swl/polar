@@ -1,0 +1,389 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.4.11</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.dlchm</groupId>
+    <artifactId>dlc</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <name>DLC Coding Agent</name>
+    <description>Local AI Coding Agent CLI - 蒂爱嘉(北京)有限公司</description>
+
+    <properties>
+        <java.version>17</java.version>
+        <spring-ai.version>1.1.3-SNAPSHOT</spring-ai.version>
+        <tamboui.version>0.2.0-SNAPSHOT</tamboui.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>dev.tamboui</groupId>
+                <artifactId>tamboui-bom</artifactId>
+                <version>${tamboui.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Spring Boot (CLI mode, no web server) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+
+        <!-- Spring AI: only core tool framework (@Tool, ToolCallback, MethodToolCallbackProvider) -->
+        <!-- NOT using spring-ai-starter-model-openai to avoid OpenAiChatModel auto-config -->
+        <!-- which forces streaming internally and is incompatible with DashScope tool calls -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-model</artifactId>
+        </dependency>
+
+        <!-- TamboUI: Terminal UI -->
+        <dependency>
+            <groupId>dev.tamboui</groupId>
+            <artifactId>tamboui-toolkit</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>dev.tamboui</groupId>
+            <artifactId>tamboui-jline3-backend</artifactId>
+        </dependency>
+
+        <!-- JLine3: Terminal input -->
+        <dependency>
+            <groupId>org.jline</groupId>
+            <artifactId>jline</artifactId>
+            <version>3.28.0</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- ===================== SkillsJars ===================== -->
+
+        <!-- Coding: Refactoring & Quality -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__refactor</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+
+        <!-- Coding: Debugging -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__systematic-debugging</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+
+        <!-- Coding: Planning & Execution -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__writing-plans</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__executing-plans</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+
+        <!-- Coding: Verification & Code Review -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__verification-before-completion</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__requesting-code-review</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__receiving-code-review</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+
+        <!-- Coding: Git Worktrees -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__using-git-worktrees</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+
+        <!-- Coding: Sub-agent Development -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>obra__superpowers__subagent-driven-development</artifactId>
+            <version>2026_02_21-e4a2375</version>
+        </dependency>
+
+        <!-- Coding: OpenAPI Code Generation -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__openapi-to-application-code</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+
+        <!-- Coding: Architecture Decision Record -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__create-architectural-decision-record</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+
+        <!-- Coding: Technical Spike -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__create-technical-spike</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+
+        <!-- Coding: Test Coverage -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__pytest-coverage</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+
+        <!-- Java: JDB Debugger -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>brunoborges__jdb-agentic-debugger__jdb-debugger</artifactId>
+            <version>2026_02_19-4b3ade6</version>
+        </dependency>
+
+        <!-- Java: Spring Boot Best Practices -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>sivaprasadreddy__sivalabs-agent-skills__spring-boot</artifactId>
+            <version>2026_02_23-dba3310</version>
+        </dependency>
+
+        <!-- Java: Maven Best Practices -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>jabrena__cursor-rules-java__110-java-maven-best-practices</artifactId>
+            <version>2026_02_23-96a0bd2</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>jabrena__cursor-rules-java__111-java-maven-dependencies</artifactId>
+            <version>2026_02_23-96a0bd2</version>
+        </dependency>
+
+        <!-- Tools: Webapp Testing (Playwright) -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__webapp-testing</artifactId>
+            <version>2026_02_25-3d59511</version>
+        </dependency>
+
+        <!-- Tools: Skill Creator -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__skill-creator</artifactId>
+            <version>2026_02_25-3d59511</version>
+        </dependency>
+
+        <!-- Tools: MCP Server Builder -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__mcp-builder</artifactId>
+            <version>2026_03_06-b0cbd3d</version>
+        </dependency>
+
+        <!-- Tools: PDF Processing -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__pdf</artifactId>
+            <version>2026_02_25-3d59511</version>
+        </dependency>
+
+        <!-- Tools: JBang MCP Server (not yet on Maven Central, uncomment when available) -->
+        <!--
+        <dependency>
+            <groupId>glaforge</groupId>
+            <artifactId>java-stdio-mcp-server</artifactId>
+            <version>2026_02_23-fd22da1</version>
+        </dependency>
+        -->
+
+        <!-- C#/.NET Skills -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__csharp-docs</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__csharp-async</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>github__awesome-copilot__ef-core</artifactId>
+            <version>2026_02_25-436de60</version>
+        </dependency>
+    </dependencies>
+
+    <repositories>
+        <repository>
+            <id>spring-snapshots</id>
+            <url>https://repo.spring.io/snapshot</url>
+            <releases><enabled>false</enabled></releases>
+            <snapshots><enabled>true</enabled></snapshots>
+        </repository>
+        <repository>
+            <id>ossrh-snapshots</id>
+            <url>https://central.sonatype.com/repository/maven-snapshots/</url>
+            <releases><enabled>false</enabled></releases>
+            <snapshots><enabled>true</enabled></snapshots>
+        </repository>
+    </repositories>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- macOS 打包: mvn package -Ppackage-mac -->
+        <profile>
+            <id>package-mac</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.panteleyev</groupId>
+                        <artifactId>jpackage-maven-plugin</artifactId>
+                        <version>1.6.5</version>
+                        <configuration>
+                            <type>DMG</type>
+                            <name>dlc</name>
+                            <appVersion>1.0.0</appVersion>
+                            <vendor>蒂爱嘉(北京)有限公司</vendor>
+                            <description>DLC - Local AI Coding Agent</description>
+                            <input>target</input>
+                            <mainJar>dlc-${project.version}.jar</mainJar>
+                            <mainClass>com.dlchm.dlc.DlcApplication</mainClass>
+                            <javaOptions>
+                                <option>-Dspring.main.web-application-type=none</option>
+                            </javaOptions>
+                            <destination>target/dist</destination>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>jpackage</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>jpackage</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Windows 打包: mvn package -Ppackage-win (需在 Windows 上执行) -->
+        <profile>
+            <id>package-win</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.panteleyev</groupId>
+                        <artifactId>jpackage-maven-plugin</artifactId>
+                        <version>1.6.5</version>
+                        <configuration>
+                            <type>EXE</type>
+                            <name>dlc</name>
+                            <appVersion>1.0.0</appVersion>
+                            <vendor>蒂爱嘉(北京)有限公司</vendor>
+                            <description>DLC - Local AI Coding Agent</description>
+                            <input>target</input>
+                            <mainJar>dlc-${project.version}.jar</mainJar>
+                            <mainClass>com.dlchm.dlc.DlcApplication</mainClass>
+                            <javaOptions>
+                                <option>-Dspring.main.web-application-type=none</option>
+                            </javaOptions>
+                            <destination>target/dist</destination>
+                            <winConsole>true</winConsole>
+                            <winMenu>true</winMenu>
+                            <winShortcut>true</winShortcut>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>jpackage</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>jpackage</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- GraalVM Native Image: mvn package -Pnative -->
+        <profile>
+            <id>native</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <configuration>
+                            <imageName>dlc</imageName>
+                            <mainClass>com.dlchm.dlc.DlcApplication</mainClass>
+                            <buildArgs>
+                                <buildArg>--no-fallback</buildArg>
+                            </buildArgs>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>compile-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <configuration>
+                            <jvmArguments>-agentlib:native-image-agent=config-output-dir=src/main/resources/META-INF/native-image</jvmArguments>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

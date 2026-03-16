@@ -1,0 +1,23 @@
+spring:
+  main:
+    web-application-type: none
+    banner-mode: off
+  ai:
+    openai:
+      base-url: ${spring.ai.openai.base-url:https://dashscope.aliyuncs.com/compatible-mode}
+      api-key: ${spring.ai.openai.api-key:placeholder}
+      chat:
+        options:
+          model: ${spring.ai.openai.chat.options.model:qwen3.5-plus-2026-02-15}
+
+dlc:
+  workspace: ${DLC_WORKSPACE:.}
+  permission-mode: ${DLC_PERMISSION_MODE:STANDARD}
+  bash-timeout-seconds: ${DLC_BASH_TIMEOUT:30}
+  max-tool-output-chars: ${DLC_MAX_OUTPUT:30000}
+
+logging:
+  level:
+    root: ERROR
+    com.dlchm.dlc: ERROR
+    org.springframework: ERROR
