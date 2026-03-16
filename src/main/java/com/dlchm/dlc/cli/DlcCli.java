@@ -50,13 +50,16 @@ public class DlcCli {
     private final SandboxPathResolver pathResolver;
     private final ToolCallbackProvider toolCallbackProvider;
     private final SessionManager sessionManager;
+    private final com.dlchm.dlc.tools.MemoryTool memoryTool;
 
     public DlcCli(CodingAgent agent, SandboxPathResolver pathResolver,
-                  ToolCallbackProvider toolCallbackProvider, SessionManager sessionManager) {
+                  ToolCallbackProvider toolCallbackProvider, SessionManager sessionManager,
+                  com.dlchm.dlc.tools.MemoryTool memoryTool) {
         this.agent = agent;
         this.pathResolver = pathResolver;
         this.toolCallbackProvider = toolCallbackProvider;
         this.sessionManager = sessionManager;
+        this.memoryTool = memoryTool;
     }
 
     public void run() {
@@ -78,7 +81,7 @@ public class DlcCli {
                      .ifPresent(p -> System.out.println(
                              ANSI_GREEN + p.getFileName() + ": loaded" + ANSI_RESET));
             } catch (Exception ignored) {}
-            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /config to reconfigure, /install <skill> to install." + ANSI_RESET);
+            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /forget to clear memory, /config to reconfigure, /install <skill> to install." + ANSI_RESET);
             System.out.println();
 
             while (true) {
@@ -129,6 +132,10 @@ public class DlcCli {
                 }
                 if ("/skills".equalsIgnoreCase(trimmed)) {
                     System.out.println(SkillInstaller.listInstalled());
+                    continue;
+                }
+                if ("/forget".equalsIgnoreCase(trimmed)) {
+                    System.out.println(ANSI_YELLOW + memoryTool.clearAll() + ANSI_RESET);
                     continue;
                 }
 

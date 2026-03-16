@@ -123,6 +123,44 @@ public class MemoryTool {
         }
     }
 
+    @Tool(name = "memory_clear", description = "Clear all memories. Use when user explicitly asks to forget everything or reset memory.")
+    public String memoryClear(
+            @ToolParam(description = "Scope: 'global', 'project', or 'all'. Default: 'all'") String scope) {
+
+        boolean clearGlobal = "global".equalsIgnoreCase(scope) || "all".equalsIgnoreCase(scope);
+        boolean clearProject = "project".equalsIgnoreCase(scope) || "all".equalsIgnoreCase(scope);
+        List<String> cleared = new ArrayList<>();
+
+        if (clearGlobal && Files.exists(globalMemoryPath)) {
+            try {
+                Files.deleteIfExists(globalMemoryPath);
+                cleared.add("全局记忆");
+            } catch (IOException e) {
+                return "清除全局记忆失败: " + e.getMessage();
+            }
+        }
+        if (clearProject && Files.exists(projectMemoryPath)) {
+            try {
+                Files.deleteIfExists(projectMemoryPath);
+                cleared.add("项目记忆");
+            } catch (IOException e) {
+                return "清除项目记忆失败: " + e.getMessage();
+            }
+        }
+
+        if (cleared.isEmpty()) {
+            return "没有需要清除的记忆。";
+        }
+        return "已清除: " + String.join("、", cleared);
+    }
+
+    /**
+     * 供 CLI /forget 命令直接调用。
+     */
+    public String clearAll() {
+        return memoryClear("all");
+    }
+
     // ==================== Loading for System Prompt ====================
 
     /**
