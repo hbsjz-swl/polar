@@ -16,7 +16,9 @@ import org.springframework.util.StreamUtils;
 
 /**
  * SkillsJars 集成工具。
- * 扫描 classpath 中 META-INF/skills 下的 SKILL.md，
+ * 扫描两个来源的 SKILL.md：
+ * 1. classpath JAR 中 META-INF/skills/（SkillsJars Maven 依赖）
+ * 2. 本地目录 ~/.dlc/skills/（兼容 ClawHub/OpenClaw 技能）
  * 提取脚本到 ~/.dlc/skills/ 目录供 bash_execute 调用。
  */
 public class SkillsTool {
@@ -45,6 +47,7 @@ public class SkillsTool {
     }
 
     private void scanSkills() {
+        // 1. 扫描 classpath JAR（SkillsJars Maven 依赖）
         PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
         String[] patterns = {
                 "classpath*:META-INF/skills/**/SKILL.md",
@@ -62,9 +65,94 @@ public class SkillsTool {
             }
         }
 
+        // 2. 扫描本地目录 ~/.dlc/skills/（兼容 ClawHub/OpenClaw 技能）
+        scanLocalSkills();
+
         if (!skills.isEmpty()) {
             log.info("Loaded {} skill(s): {}", skills.size(), skills.keySet());
         }
+    }
+
+    /**
+     * 扫描 ~/.dlc/skills/ 下的本地技能。
+     * 支持两种目录结构：
+     *   ~/.dlc/skills/<name>/SKILL.md          （标准目录结构）
+     *   ~/.dlc/skills/<author>/<name>/SKILL.md  （ClawHub 安装结构）
+     */
+    private void scanLocalSkills() {
+        if (!Files.isDirectory(SKILLS_DIR)) return;
+
+        try (var topLevel = Files.list(SKILLS_DIR)) {
+            topLevel.filter(Files::isDirectory).forEach(dir -> {
+                Path skillMd = dir.resolve("SKILL.md");
+                if (Files.isRegularFile(skillMd)) {
+                    loadLocalSkill(skillMd);
+                } else {
+                    // 可能是 author/name 两级结构
+                    try (var subLevel = Files.list(dir)) {
+                        subLevel.filter(Files::isDirectory).forEach(subDir -> {
+                            Path nested = subDir.resolve("SKILL.md");
+                            if (Files.isRegularFile(nested)) {
+                                loadLocalSkill(nested);
+                            }
+                        });
+                    } catch (IOException ignored) {}
+                }
+            });
+        } catch (IOException e) {
+            log.debug("Failed to scan local skills directory: {}", e.getMessage());
+        }
+    }
+
+    private void loadLocalSkill(Path skillMdPath) {
+        try {
+            String content = Files.readString(skillMdPath, StandardCharsets.UTF_8);
+            String dirName = skillMdPath.getParent().getFileName().toString();
+            String name = extractFrontmatterField(content, "name");
+            if (name == null || name.isBlank()) {
+                name = dirName;
+            }
+
+            // 已从 classpath 加载过同名技能则跳过
+            if (skills.containsKey(name)) {
+                log.debug("Skipping local skill '{}', already loaded from classpath", name);
+                return;
+            }
+
+            String description = extractDescription(content);
+            Map<String, String> companions = loadLocalCompanionFiles(skillMdPath.getParent());
+            Path scriptsDir = extractScriptsToFileSystem(name, companions);
+
+            skills.put(name, new SkillEntry(name, description, content, companions, scriptsDir));
+            log.info("Registered local skill: {} ({})", name, skillMdPath);
+        } catch (IOException e) {
+            log.warn("Failed to load local skill from {}: {}", skillMdPath, e.getMessage());
+        }
+    }
+
+    private Map<String, String> loadLocalCompanionFiles(Path skillDir) {
+        Map<String, String> companions = new LinkedHashMap<>();
+        for (String[] pattern : COMPANION_PATTERNS) {
+            String prefix = pattern[1];
+            Path searchDir = prefix.isEmpty() ? skillDir : skillDir.resolve(prefix.replace("/", ""));
+            if (!Files.isDirectory(searchDir)) continue;
+
+            try (var files = Files.list(searchDir)) {
+                String ext = pattern[0].substring(pattern[0].lastIndexOf('.'));
+                files.filter(f -> Files.isRegularFile(f) && f.toString().endsWith(ext))
+                        .filter(f -> !f.getFileName().toString().equalsIgnoreCase("SKILL.md"))
+                        .filter(f -> !f.getFileName().toString().equalsIgnoreCase("LICENSE.txt"))
+                        .forEach(f -> {
+                            try {
+                                String key = prefix.isEmpty()
+                                        ? f.getFileName().toString()
+                                        : prefix + f.getFileName().toString();
+                                companions.put(key, Files.readString(f, StandardCharsets.UTF_8));
+                            } catch (IOException ignored) {}
+                        });
+            } catch (IOException ignored) {}
+        }
+        return companions;
     }
 
     private void loadSkill(Resource resource) {

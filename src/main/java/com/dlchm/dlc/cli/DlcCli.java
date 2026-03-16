@@ -7,6 +7,7 @@ import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.session.SessionManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Collectors;
@@ -77,7 +78,7 @@ public class DlcCli {
                      .ifPresent(p -> System.out.println(
                              ANSI_GREEN + p.getFileName() + ": loaded" + ANSI_RESET));
             } catch (Exception ignored) {}
-            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /config to reconfigure." + ANSI_RESET);
+            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /config to reconfigure, /install <skill> to install." + ANSI_RESET);
             System.out.println();
 
             while (true) {
@@ -105,6 +106,29 @@ public class DlcCli {
                 if ("/config".equalsIgnoreCase(trimmed)) {
                     DlcSetup.reconfigure();
                     System.out.println(ANSI_YELLOW + "Config updated. Restart DLC to apply changes." + ANSI_RESET);
+                    continue;
+                }
+                if (trimmed.toLowerCase().startsWith("/install ")) {
+                    String slug = trimmed.substring(9).trim();
+                    if (slug.isBlank()) {
+                        System.out.println(ANSI_YELLOW + "Usage: /install <skill-name>" + ANSI_RESET);
+                    } else {
+                        System.out.println(ANSI_DIM + "Installing " + slug + " from ClawHub..." + ANSI_RESET);
+                        System.out.println(SkillInstaller.install(slug));
+                    }
+                    continue;
+                }
+                if (trimmed.toLowerCase().startsWith("/uninstall ")) {
+                    String slug = trimmed.substring(11).trim();
+                    if (slug.isBlank()) {
+                        System.out.println(ANSI_YELLOW + "Usage: /uninstall <skill-name>" + ANSI_RESET);
+                    } else {
+                        System.out.println(SkillInstaller.uninstall(slug));
+                    }
+                    continue;
+                }
+                if ("/skills".equalsIgnoreCase(trimmed)) {
+                    System.out.println(SkillInstaller.listInstalled());
                     continue;
                 }
 
