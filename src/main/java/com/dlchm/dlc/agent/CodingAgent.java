@@ -204,8 +204,29 @@ public class CodingAgent {
                 try (var lines = response.body()) {
                     errorBody = lines.collect(Collectors.joining("\n"));
                 }
-                throw new RuntimeException("API error (" + response.statusCode() + "): "
-                        + extractErrorMessage(errorBody));
+                String errorMsg = extractErrorMessage(errorBody);
+
+                // 400 错误且不是第一轮 → 可能是上轮工具调用参数导致，回退重试
+                if (response.statusCode() == 400 && i > 0) {
+                    log.warn("API 400 error after tool call, rolling back tool round: {}", errorMsg);
+                    // 移除上一轮的 assistant(tool_calls) + tool results
+                    while (messages.size() > 0) {
+                        JsonNode last = messages.get(messages.size() - 1);
+                        String role = last.path("role").asText("");
+                        if ("tool".equals(role) || (last.has("tool_calls"))) {
+                            messages.remove(messages.size() - 1);
+                        } else {
+                            break;
+                        }
+                    }
+                    // 加一条提示让模型不要用工具，直接回答
+                    messages.add(objectMapper.createObjectNode()
+                            .put("role", "user")
+                            .put("content", "[系统提示] 上次工具调用参数格式有误，请直接用文字回答，不要调用工具。"));
+                    continue;
+                }
+
+                throw new RuntimeException("API error (" + response.statusCode() + "): " + errorMsg);
             }
 
             // Parse SSE stream
@@ -264,7 +285,15 @@ public class CodingAgent {
                 return;
             }
 
-            // Build assistant message with tool_calls for conversation history
+            // 先修复所有工具参数，过滤掉无法修复的
+            for (ToolCallAccumulator acc : accumulators.values()) {
+                String argsStr = acc.arguments.toString().trim();
+                argsStr = fixToolArguments(argsStr);
+                acc.arguments.setLength(0);
+                acc.arguments.append(argsStr);
+            }
+
+            // Build assistant message with tool_calls (使用修复后的参数)
             ObjectNode assistantMsg = objectMapper.createObjectNode();
             assistantMsg.put("role", "assistant");
             if (contentBuilder.length() > 0) {
@@ -275,10 +304,10 @@ public class CodingAgent {
             ArrayNode toolCallsArray = objectMapper.createArrayNode();
             for (ToolCallAccumulator acc : accumulators.values()) {
                 ObjectNode tc = objectMapper.createObjectNode();
-                tc.put("id", acc.id);
+                tc.put("id", acc.id != null ? acc.id : "call_" + System.nanoTime());
                 tc.put("type", "function");
                 ObjectNode fn = objectMapper.createObjectNode();
-                fn.put("name", acc.name);
+                fn.put("name", acc.name != null ? acc.name : "unknown");
                 fn.put("arguments", acc.arguments.toString());
                 tc.set("function", fn);
                 toolCallsArray.add(tc);
@@ -288,19 +317,7 @@ public class CodingAgent {
 
             // Execute tools
             for (ToolCallAccumulator acc : accumulators.values()) {
-                // 验证和修复工具参数 JSON
-                String argsStr = acc.arguments.toString().trim();
-                argsStr = fixToolArguments(argsStr);
-                acc.arguments.setLength(0);
-                acc.arguments.append(argsStr);
-
-                // 同步修复 assistantMsg 中 tool_calls 的 arguments
-                for (JsonNode tcNode : assistantMsg.path("tool_calls")) {
-                    if (acc.id != null && acc.id.equals(tcNode.path("id").asText())) {
-                        ((ObjectNode) tcNode.path("function")).put("arguments", argsStr);
-                    }
-                }
-
+                String argsStr = acc.arguments.toString();
                 ToolCallback callback = toolMap.get(acc.name);
                 String result;
                 if (callback != null) {
@@ -313,9 +330,10 @@ public class CodingAgent {
                     result = "Error: Unknown tool '" + acc.name + "'";
                 }
 
+                String callId = acc.id != null ? acc.id : "call_" + System.nanoTime();
                 messages.add(objectMapper.createObjectNode()
                         .put("role", "tool")
-                        .put("tool_call_id", acc.id)
+                        .put("tool_call_id", callId)
                         .put("content", result));
             }
             // Loop continues → next streaming request with tool results
