@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.dlchm.dlc.session.Session;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -41,8 +42,8 @@ public class CodingAgent {
 
     private static final Logger log = LoggerFactory.getLogger(CodingAgent.class);
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-    private static final int MAX_TOOL_ITERATIONS = 25;
-    private static final int MAX_HISTORY_MESSAGES = 40; // 保留最近 20 轮对话（user + assistant）
+    private static final int MAX_TOOL_ITERATIONS = 30;
+    private static final int MAX_HISTORY_MESSAGES = 40;
     private static final List<String> AGENT_MD_NAMES = List.of(
             "AGENT.md", "agent.md", "Agent.md"
     );
@@ -52,7 +53,6 @@ public class CodingAgent {
             .build();
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final List<ObjectNode> conversationHistory = new ArrayList<>();
     private final ToolCallbackProvider toolCallbacks;
     private final SandboxPathResolver pathResolver;
     private final MemoryTool memoryTool;
@@ -121,11 +121,11 @@ public class CodingAgent {
     /**
      * 流式调用 LLM，逐 token 输出。工具调用自动执行后继续流式输出。
      */
-    public Flux<StreamEvent> stream(String userMessage) {
+    public Flux<StreamEvent> stream(Session session, String userMessage) {
         return Flux.<StreamEvent>create(sink -> {
             reactor.core.scheduler.Schedulers.boundedElastic().schedule(() -> {
                 try {
-                    streamChat(userMessage, sink);
+                    streamChat(session, userMessage, sink);
                     sink.complete();
                 } catch (Exception e) {
                     sink.error(e);
@@ -137,9 +137,9 @@ public class CodingAgent {
     /**
      * 非流式调用（同步），内部收集流式结果。
      */
-    public String chat(String userMessage) {
+    public String chat(Session session, String userMessage) {
         StringBuilder result = new StringBuilder();
-        stream(userMessage)
+        stream(session, userMessage)
                 .doOnNext(event -> {
                     if (event.type() == StreamEvent.Type.TOKEN) {
                         result.append(event.data());
@@ -149,7 +149,7 @@ public class CodingAgent {
         return result.toString();
     }
 
-    private void streamChat(String userMessage, FluxSink<StreamEvent> sink) throws Exception {
+    private void streamChat(Session session, String userMessage, FluxSink<StreamEvent> sink) throws Exception {
         ToolCallback[] callbacks = toolCallbacks.getToolCallbacks();
         Map<String, ToolCallback> toolMap = new HashMap<>();
         for (ToolCallback cb : callbacks) {
@@ -168,10 +168,8 @@ public class CodingAgent {
         ArrayNode messages = objectMapper.createArrayNode();
         messages.add(objectMapper.createObjectNode()
                 .put("role", "system").put("content", systemText));
-        synchronized (conversationHistory) {
-            for (ObjectNode historyMsg : conversationHistory) {
-                messages.add(historyMsg);
-            }
+        for (ObjectNode historyMsg : session.getHistory()) {
+            messages.add(historyMsg);
         }
         ObjectNode userMsg = objectMapper.createObjectNode()
                 .put("role", "user").put("content", userMessage);
@@ -262,7 +260,7 @@ public class CodingAgent {
             // No tool calls → done, save to conversation history
             if (accumulators.isEmpty()) {
                 finalAssistantText = contentBuilder.toString();
-                saveToHistory(userMsg, finalAssistantText);
+                saveToHistory(session, userMsg, finalAssistantText);
                 return;
             }
 
@@ -311,32 +309,17 @@ public class CodingAgent {
         }
 
         // 达到最大迭代次数，仍保存对话记录
-        saveToHistory(userMsg, "(max tool iterations reached)");
+        saveToHistory(session, userMsg, "(max tool iterations reached)");
         throw new RuntimeException("Maximum tool iterations (" + MAX_TOOL_ITERATIONS + ") reached.");
     }
 
     // ==================== Conversation History ====================
 
-    private void saveToHistory(ObjectNode userMsg, String assistantText) {
-        synchronized (conversationHistory) {
-            conversationHistory.add(userMsg.deepCopy());
-            conversationHistory.add(objectMapper.createObjectNode()
-                    .put("role", "assistant")
-                    .put("content", assistantText != null ? assistantText : ""));
-            // 保留最近 MAX_HISTORY_MESSAGES 条消息
-            while (conversationHistory.size() > MAX_HISTORY_MESSAGES) {
-                conversationHistory.remove(0);
-            }
-        }
-    }
-
-    /**
-     * 清空会话历史（/clear 命令使用）。
-     */
-    public void clearHistory() {
-        synchronized (conversationHistory) {
-            conversationHistory.clear();
-        }
+    private void saveToHistory(Session session, ObjectNode userMsg, String assistantText) {
+        session.addMessage(userMsg);
+        session.addMessage(objectMapper.createObjectNode()
+                .put("role", "assistant")
+                .put("content", assistantText != null ? assistantText : ""));
     }
 
     // ==================== Tool call chunk accumulator ====================
@@ -385,7 +368,4 @@ public class CodingAgent {
         return "\n\n## Project Rules (from AGENT.md)\n\n" + agentMdContent;
     }
 
-    public record StreamEvent(Type type, String data) {
-        public enum Type { TOKEN, REASONING }
-    }
 }

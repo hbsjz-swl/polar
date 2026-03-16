@@ -5,7 +5,7 @@ import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * DLC CLI 配置。
+ * DLC 配置。
  */
 @ConfigurationProperties(prefix = "dlc")
 public class DlcProperties {
@@ -25,43 +25,46 @@ public class DlcProperties {
     /** 工具输出最大字符数 */
     private int maxToolOutputChars = 30000;
 
-    public String getWorkspace() {
-        return workspace;
+    /** Channels 配置 */
+    private ChannelsConfig channels = new ChannelsConfig();
+
+    public String getWorkspace() { return workspace; }
+    public void setWorkspace(String workspace) { this.workspace = workspace; }
+    public String getPermissionMode() { return permissionMode; }
+    public void setPermissionMode(String permissionMode) { this.permissionMode = permissionMode; }
+    public List<String> getBlockedPaths() { return blockedPaths; }
+    public void setBlockedPaths(List<String> blockedPaths) { this.blockedPaths = blockedPaths; }
+    public int getBashTimeoutSeconds() { return bashTimeoutSeconds; }
+    public void setBashTimeoutSeconds(int bashTimeoutSeconds) { this.bashTimeoutSeconds = bashTimeoutSeconds; }
+    public int getMaxToolOutputChars() { return maxToolOutputChars; }
+    public void setMaxToolOutputChars(int maxToolOutputChars) { this.maxToolOutputChars = maxToolOutputChars; }
+    public ChannelsConfig getChannels() { return channels; }
+    public void setChannels(ChannelsConfig channels) { this.channels = channels; }
+
+    // ==================== Nested Config Classes ====================
+
+    public static class ChannelsConfig {
+        private WeComConfig wecom = new WeComConfig();
+
+        public WeComConfig getWecom() { return wecom; }
+        public void setWecom(WeComConfig wecom) { this.wecom = wecom; }
     }
 
-    public void setWorkspace(String workspace) {
-        this.workspace = workspace;
-    }
+    /**
+     * 企微配置：配置了 corp-id + secret 就自动连接，无需 enabled 开关。
+     */
+    public static class WeComConfig {
+        private String corpId = "";
+        private String secret = "";
 
-    public String getPermissionMode() {
-        return permissionMode;
-    }
+        public boolean isConfigured() {
+            return corpId != null && !corpId.isBlank()
+                    && secret != null && !secret.isBlank();
+        }
 
-    public void setPermissionMode(String permissionMode) {
-        this.permissionMode = permissionMode;
-    }
-
-    public List<String> getBlockedPaths() {
-        return blockedPaths;
-    }
-
-    public void setBlockedPaths(List<String> blockedPaths) {
-        this.blockedPaths = blockedPaths;
-    }
-
-    public int getBashTimeoutSeconds() {
-        return bashTimeoutSeconds;
-    }
-
-    public void setBashTimeoutSeconds(int bashTimeoutSeconds) {
-        this.bashTimeoutSeconds = bashTimeoutSeconds;
-    }
-
-    public int getMaxToolOutputChars() {
-        return maxToolOutputChars;
-    }
-
-    public void setMaxToolOutputChars(int maxToolOutputChars) {
-        this.maxToolOutputChars = maxToolOutputChars;
+        public String getCorpId() { return corpId; }
+        public void setCorpId(String corpId) { this.corpId = corpId; }
+        public String getSecret() { return secret; }
+        public void setSecret(String secret) { this.secret = secret; }
     }
 }

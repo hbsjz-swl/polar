@@ -1,8 +1,10 @@
 package com.dlchm.dlc.cli;
 
 import com.dlchm.dlc.agent.CodingAgent;
-import com.dlchm.dlc.agent.CodingAgent.StreamEvent;
+import com.dlchm.dlc.agent.StreamEvent;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
+import com.dlchm.dlc.session.Session;
+import com.dlchm.dlc.session.SessionManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -34,7 +36,7 @@ public class DlcCli {
               ██████╔╝███████╗╚██████╗
               ╚═════╝ ╚══════╝ ╚═════╝
               Local AI Coding Agent
-              蒂爱嘉(北京)有限公司-石家庄AI项目组研发
+              蒂爱喜(北京)科技有限公司-石家庄AI项目组研发
             """;
 
     private static final String ANSI_RESET = "\u001B[0m";
@@ -46,16 +48,20 @@ public class DlcCli {
     private final CodingAgent agent;
     private final SandboxPathResolver pathResolver;
     private final ToolCallbackProvider toolCallbackProvider;
+    private final SessionManager sessionManager;
 
-    public DlcCli(CodingAgent agent, SandboxPathResolver pathResolver, ToolCallbackProvider toolCallbackProvider) {
+    public DlcCli(CodingAgent agent, SandboxPathResolver pathResolver,
+                  ToolCallbackProvider toolCallbackProvider, SessionManager sessionManager) {
         this.agent = agent;
         this.pathResolver = pathResolver;
         this.toolCallbackProvider = toolCallbackProvider;
+        this.sessionManager = sessionManager;
     }
 
     public void run() {
         try (Terminal terminal = TerminalBuilder.builder().system(true).build()) {
             LineReader reader = LineReaderBuilder.builder().terminal(terminal).build();
+            Session session = sessionManager.getCliSession();
 
             System.out.println(ANSI_CYAN + BANNER + ANSI_RESET);
             System.out.println(ANSI_DIM + "Workspace: " + pathResolver.getWorkspaceRoot() + ANSI_RESET);
@@ -90,7 +96,7 @@ public class DlcCli {
                     break;
                 }
                 if ("/clear".equalsIgnoreCase(trimmed)) {
-                    agent.clearHistory();
+                    session.clearHistory();
                     System.out.print("\033[H\033[2J");
                     System.out.flush();
                     System.out.println(ANSI_DIM + "History cleared." + ANSI_RESET);
@@ -102,21 +108,21 @@ public class DlcCli {
                     continue;
                 }
 
-                processMessage(trimmed);
+                processMessage(session, trimmed);
             }
         } catch (Exception e) {
             System.err.println("Terminal error: " + e.getMessage());
         }
     }
 
-    private void processMessage(String userMessage) {
+    private void processMessage(Session session, String userMessage) {
         System.out.println();
         System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
 
         CountDownLatch latch = new CountDownLatch(1);
         StringBuilder fullResponse = new StringBuilder();
 
-        agent.stream(userMessage)
+        agent.stream(session, userMessage)
                 .subscribe(
                         event -> {
                             if (event.type() == StreamEvent.Type.REASONING) {

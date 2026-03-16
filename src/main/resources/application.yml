@@ -1,6 +1,6 @@
 spring:
   main:
-    web-application-type: none
+    web-application-type: reactive
     banner-mode: off
   ai:
     openai:
@@ -10,11 +10,18 @@ spring:
         options:
           model: ${spring.ai.openai.chat.options.model:qwen3.5-plus-2026-02-15}
 
+server:
+  port: ${SERVER_PORT:19869}
+
 dlc:
   workspace: ${DLC_WORKSPACE:.}
   permission-mode: ${DLC_PERMISSION_MODE:STANDARD}
   bash-timeout-seconds: ${DLC_BASH_TIMEOUT:30}
   max-tool-output-chars: ${DLC_MAX_OUTPUT:30000}
+  channels:
+    wecom:
+      corp-id: ${DLC_WECOM_CORP_ID:aib8efuHskeqnaqNE}
+      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrLkviPX6NlRRVbjEztF5k}
 
 logging:
   level:
