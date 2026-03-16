@@ -219,6 +219,7 @@ public class WeComChannel implements Channel {
 
     private void processAndReply(Session session, String reqId, String userMessage) {
         String streamId = WeComApiClient.uuid();
+        StringBuilder accumulated = new StringBuilder();
 
         agent.stream(session, userMessage)
                 .filter(event -> event.type() == StreamEvent.Type.TOKEN)
@@ -227,13 +228,16 @@ public class WeComChannel implements Channel {
                 .filter(batch -> !batch.isEmpty())
                 .map(batch -> String.join("", batch))
                 .subscribe(
-                        chunk -> sendStreamReply(reqId, streamId, chunk, false),
+                        chunk -> {
+                            accumulated.append(chunk);
+                            sendStreamReply(reqId, streamId, accumulated.toString(), false);
+                        },
                         error -> {
                             log.error("WeCom agent error: {}", error.getMessage());
-                            sendStreamReply(reqId, streamId,
-                                    "\n\n[Error: " + error.getMessage() + "]", true);
+                            accumulated.append("\n\n[Error: ").append(error.getMessage()).append("]");
+                            sendStreamReply(reqId, streamId, accumulated.toString(), true);
                         },
-                        () -> sendStreamReply(reqId, streamId, "", true)
+                        () -> sendStreamReply(reqId, streamId, accumulated.toString(), true)
                 );
     }
 
