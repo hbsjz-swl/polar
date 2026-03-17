@@ -75,7 +75,7 @@ python --version
 
 ```cmd
 pip install playwright
-playwright install chromium
+playwright install chromium(如果失败使用npx安装: npx playwright install chromium)
 ```
 
 > macOS / Linux 用户通常已预装 Python，将上述命令中的 `python` 替换为 `python3`、`pip` 替换为 `pip3` 即可。
