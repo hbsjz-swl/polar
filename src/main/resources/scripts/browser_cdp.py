@@ -390,6 +390,7 @@ if __name__ == "__main__":
     parser.add_argument("--tab", type=int, default=0,
                         help="Tab index to operate on (default: 0)")
     parser.add_argument("--actions", help="JSON array of actions (for action mode)")
+    parser.add_argument("--actions-file", help="Path to JSON file containing actions (alternative to --actions)")
     parser.add_argument("--screenshot", help="Save screenshot to path")
     args = parser.parse_args()
 
@@ -406,11 +407,22 @@ if __name__ == "__main__":
                 result = view_page(page, args.screenshot)
 
             elif args.mode == "action":
-                if not args.actions:
-                    print(json.dumps({"error": "--actions is required for action mode"}))
+                # 优先从文件读取 actions，解决 Windows 命令行 JSON 转义问题
+                actions_json = None
+                if args.actions_file:
+                    try:
+                        with open(args.actions_file, "r", encoding="utf-8") as f:
+                            actions_json = f.read()
+                    except Exception as e:
+                        print(json.dumps({"error": f"Failed to read actions file: {e}"}))
+                        sys.exit(1)
+                elif args.actions:
+                    actions_json = args.actions
+                else:
+                    print(json.dumps({"error": "--actions or --actions-file is required for action mode"}))
                     sys.exit(1)
                 try:
-                    actions = json.loads(args.actions)
+                    actions = json.loads(actions_json)
                 except json.JSONDecodeError as e:
                     print(json.dumps({"error": f"Invalid JSON: {e}"}))
                     sys.exit(1)

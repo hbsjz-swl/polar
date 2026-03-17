@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -149,14 +150,24 @@ public class BrowserTool {
             return "Error: browser_cdp.py not found. Restart DLC to extract built-in scripts.";
         }
 
+        // 将 JSON 写入临时文件，避免 Windows 命令行双引号转义问题
+        Path actionsFile;
+        try {
+            actionsFile = Files.createTempFile("dlc-actions-", ".json");
+            Files.writeString(actionsFile, actions, StandardCharsets.UTF_8);
+            actionsFile.toFile().deleteOnExit();
+        } catch (Exception e) {
+            return "Error: Failed to write actions file: " + e.getMessage();
+        }
+
         List<String> cmd = new ArrayList<>();
         cmd.add(PYTHON_CMD);
         cmd.add(script.toString());
         cmd.add("action");
         cmd.add("--cdp-url");
         cmd.add(CDP_URL);
-        cmd.add("--actions");
-        cmd.add(actions);
+        cmd.add("--actions-file");
+        cmd.add(actionsFile.toString());
         if (tab != null) {
             cmd.add("--tab");
             cmd.add(String.valueOf(tab));
