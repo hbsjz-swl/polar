@@ -43,6 +43,9 @@ public class CodingAgent {
     private static final Logger log = LoggerFactory.getLogger(CodingAgent.class);
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final int MAX_TOOL_ITERATIONS = 30;
+    private static final int MAX_ROLLBACKS = 3;
+    private static final int MAX_TOOL_RESULT_LENGTH = 4000;
+    private static final int LOOP_DETECT_THRESHOLD = 3;
     private static final int MAX_HISTORY_MESSAGES = 40;
     private static final List<String> AGENT_MD_NAMES = List.of(
             "AGENT.md", "agent.md", "Agent.md"
@@ -57,9 +60,9 @@ public class CodingAgent {
     private final SandboxPathResolver pathResolver;
     private final MemoryTool memoryTool;
     private final String systemPromptTemplate;
-    private final String baseUrl;
-    private final String apiKey;
-    private final String model;
+    private volatile String baseUrl;
+    private volatile String apiKey;
+    private volatile String model;
     private String agentMdContent;
 
     public CodingAgent(
@@ -78,6 +81,18 @@ public class CodingAgent {
         this.apiKey = apiKey;
         this.model = model;
         this.agentMdContent = loadAgentMd();
+    }
+
+    /**
+     * 运行时更新 API 配置（/config 后立即生效，无需重启）。
+     */
+    public void reloadConfig() {
+        String newBaseUrl = System.getProperty("spring.ai.openai.base-url");
+        String newApiKey = System.getProperty("spring.ai.openai.api-key");
+        String newModel = System.getProperty("spring.ai.openai.chat.options.model");
+        if (newBaseUrl != null && !newBaseUrl.isBlank()) this.baseUrl = newBaseUrl;
+        if (newApiKey != null && !newApiKey.isBlank()) this.apiKey = newApiKey;
+        if (newModel != null && !newModel.isBlank()) this.model = newModel;
     }
 
     // ==================== AGENT.md ====================
@@ -176,12 +191,16 @@ public class CodingAgent {
         messages.add(userMsg);
 
         String finalAssistantText = null;
+        int rollbackCount = 0;
+        List<String> recentAssistantTexts = new ArrayList<>(); // 用于循环检测
 
         for (int i = 0; i < MAX_TOOL_ITERATIONS; i++) {
             ObjectNode requestBody = objectMapper.createObjectNode();
             requestBody.put("model", model);
             requestBody.set("messages", messages);
-            if (toolDefs.size() > 0) {
+            // 连续回退超过限制时，不再发送工具定义，强制模型纯文字回答
+            boolean toolsDisabled = rollbackCount >= MAX_ROLLBACKS;
+            if (!toolsDisabled && !toolDefs.isEmpty()) {
                 requestBody.set("tools", toolDefs);
             }
             requestBody.put("temperature", 0.1);
@@ -208,9 +227,11 @@ public class CodingAgent {
 
                 // 400/500 错误且不是第一轮 → 可能是上轮工具调用参数或内容导致，回退重试
                 if ((response.statusCode() == 400 || response.statusCode() == 500) && i > 0) {
-                    log.warn("API {} error after tool call, rolling back: {}", response.statusCode(), errorMsg);
+                    rollbackCount++;
+                    log.warn("API {} error after tool call (rollback {}/{}): {}",
+                            response.statusCode(), rollbackCount, MAX_ROLLBACKS, errorMsg);
                     // 移除上一轮的 assistant(tool_calls) + tool results
-                    while (messages.size() > 0) {
+                    while (!messages.isEmpty()) {
                         JsonNode last = messages.get(messages.size() - 1);
                         String role = last.path("role").asText("");
                         if ("tool".equals(role) || (last.has("tool_calls"))) {
@@ -219,15 +240,37 @@ public class CodingAgent {
                             break;
                         }
                     }
-                    // 加一条提示让模型不要用工具，直接回答
-                    messages.add(objectMapper.createObjectNode()
-                            .put("role", "user")
-                            .put("content", "[系统提示] 上次工具调用参数格式有误，请直接用文字回答，不要调用工具。"));
+                    // 同时移除之前可能累积的回退提示，避免重复
+                    while (!messages.isEmpty()) {
+                        JsonNode last = messages.get(messages.size() - 1);
+                        String content = last.path("content").asText("");
+                        if ("user".equals(last.path("role").asText(""))
+                                && content.startsWith("[系统提示]")) {
+                            messages.remove(messages.size() - 1);
+                        } else {
+                            break;
+                        }
+                    }
+                    if (rollbackCount >= MAX_ROLLBACKS) {
+                        // 已多次失败，告诉模型不用工具直接回答
+                        messages.add(objectMapper.createObjectNode()
+                                .put("role", "user")
+                                .put("content", "[系统提示] 工具调用多次失败，请根据已获得的信息直接用文字回答用户的问题。"));
+                    } else {
+                        // 还有重试机会，提示修正参数
+                        messages.add(objectMapper.createObjectNode()
+                                .put("role", "user")
+                                .put("content", "[系统提示] 上次工具调用参数格式有误(错误:" + errorMsg
+                                        + ")，请检查JSON格式后重新调用。"));
+                    }
                     continue;
                 }
 
                 throw new RuntimeException("API error (" + response.statusCode() + "): " + errorMsg);
             }
+
+            // 成功请求后重置回退计数
+            rollbackCount = 0;
 
             // Parse SSE stream
             StringBuilder contentBuilder = new StringBuilder();
@@ -285,6 +328,30 @@ public class CodingAgent {
                 return;
             }
 
+            // === 循环检测：如果模型连续多次输出相似内容，说明在原地打转 ===
+            String currentText = contentBuilder.toString().trim();
+            if (!currentText.isEmpty()) {
+                // 取前80个字符作为签名比较
+                String sig = currentText.length() > 80 ? currentText.substring(0, 80) : currentText;
+                recentAssistantTexts.add(sig);
+                // 只保留最近的记录
+                if (recentAssistantTexts.size() > LOOP_DETECT_THRESHOLD + 2) {
+                    recentAssistantTexts.remove(0);
+                }
+                // 检查最近 N 次是否相同
+                if (recentAssistantTexts.size() >= LOOP_DETECT_THRESHOLD) {
+                    String last = recentAssistantTexts.get(recentAssistantTexts.size() - 1);
+                    long sameCount = recentAssistantTexts.stream().filter(s -> s.equals(last)).count();
+                    if (sameCount >= LOOP_DETECT_THRESHOLD) {
+                        log.warn("Loop detected: assistant repeated similar output {} times, breaking", sameCount);
+                        sink.next(new StreamEvent(StreamEvent.Type.TOKEN,
+                                "\n\n[检测到循环，自动终止。请尝试简化指令或更换模型。]"));
+                        saveToHistory(session, userMsg, currentText + "\n[循环终止]");
+                        return;
+                    }
+                }
+            }
+
             // 先修复所有工具参数，过滤掉无法修复的
             for (ToolCallAccumulator acc : accumulators.values()) {
                 String argsStr = acc.arguments.toString().trim();
@@ -328,6 +395,12 @@ public class CodingAgent {
                     }
                 } else {
                     result = "Error: Unknown tool '" + acc.name + "'";
+                }
+
+                // 截断过大的工具返回结果，防止上下文膨胀导致模型迷失
+                if (result.length() > MAX_TOOL_RESULT_LENGTH) {
+                    result = result.substring(0, MAX_TOOL_RESULT_LENGTH)
+                            + "\n...(结果已截断，共 " + result.length() + " 字符)";
                 }
 
                 String callId = acc.id != null ? acc.id : "call_" + System.nanoTime();

@@ -7,7 +7,6 @@ import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.session.SessionManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Collectors;
@@ -108,7 +107,8 @@ public class DlcCli {
                 }
                 if ("/config".equalsIgnoreCase(trimmed)) {
                     DlcSetup.reconfigure();
-                    System.out.println(ANSI_YELLOW + "Config updated. Restart DLC to apply changes." + ANSI_RESET);
+                    agent.reloadConfig();
+                    System.out.println(ANSI_GREEN + "配置已更新，立即生效。" + ANSI_RESET);
                     continue;
                 }
                 if (trimmed.toLowerCase().startsWith("/install ")) {
@@ -166,17 +166,17 @@ public class DlcCli {
                         error -> {
                             System.out.println();
                             String msg = error.getMessage() != null ? error.getMessage() : "";
-                            if (msg.contains("401") || msg.contains("403")
-                                    || msg.contains("Unauthorized") || msg.contains("Invalid API")
-                                    || msg.contains("invalid_api_key") || msg.contains("authentication")) {
-                                System.out.println(ANSI_YELLOW + "API Key 无效或已过期，请重新配置：" + ANSI_RESET);
-                                DlcSetup.reconfigure();
-                                System.out.println(ANSI_YELLOW + "配置已更新，请重启 DLC 后生效。" + ANSI_RESET);
-                            } else if (msg.contains("404") || msg.contains("does not exist")
-                                    || msg.contains("model_not_found")) {
-                                System.out.println(ANSI_YELLOW + "模型不存在，请重新配置：" + ANSI_RESET);
-                                DlcSetup.reconfigure();
-                                System.out.println(ANSI_YELLOW + "配置已更新，请重启 DLC 后生效。" + ANSI_RESET);
+                            if (isModelError(msg)) {
+                                System.out.println(ANSI_YELLOW + "模型不可用或无访问权限。" + ANSI_RESET);
+                                System.out.println(ANSI_DIM + "错误详情: " + msg + ANSI_RESET);
+                                System.out.println(ANSI_YELLOW + "请确认模型名称是否正确，输入 /config 重新配置。" + ANSI_RESET);
+                            } else if (isAuthError(msg)) {
+                                System.out.println(ANSI_YELLOW + "API Key 无效或已过期。" + ANSI_RESET);
+                                System.out.println(ANSI_DIM + "错误详情: " + msg + ANSI_RESET);
+                                System.out.println(ANSI_YELLOW + "输入 /config 重新配置，或直接输入消息重试。" + ANSI_RESET);
+                            } else if (isTransientError(msg)) {
+                                System.out.println(ANSI_YELLOW + "服务暂时不可用，请稍后重试。" + ANSI_RESET);
+                                System.out.println(ANSI_DIM + "错误详情: " + msg + ANSI_RESET);
                             } else {
                                 System.out.println(ANSI_YELLOW + "Error: " + msg + ANSI_RESET);
                             }
@@ -194,5 +194,29 @@ public class DlcCli {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    private boolean isAuthError(String msg) {
+        String lower = msg.toLowerCase();
+        return lower.contains("unauthorized") || lower.contains("401")
+                || lower.contains("invalid api key") || lower.contains("authentication")
+                || lower.contains("invalid_api_key") || lower.contains("incorrect api key");
+    }
+
+    private boolean isModelError(String msg) {
+        String lower = msg.toLowerCase();
+        return lower.contains("model not found") || lower.contains("model_not_found")
+                || lower.contains("does not exist") || lower.contains("no such model")
+                || lower.contains("unknown model") || lower.contains("not available")
+                || lower.contains("access denied") || lower.contains("model access")
+                || lower.contains("permission denied");
+    }
+
+    private boolean isTransientError(String msg) {
+        String lower = msg.toLowerCase();
+        return lower.contains("timeout") || lower.contains("timed out")
+                || lower.contains("503") || lower.contains("502") || lower.contains("429")
+                || lower.contains("rate limit") || lower.contains("overloaded")
+                || lower.contains("connection refused") || lower.contains("connection reset");
     }
 }
