@@ -55,6 +55,31 @@ git clone https://git.dlchm.cn/sunweilin/coding-agent.git && cd coding-agent && 
 
 安装脚本会自动复制 jar、创建启动器、配置 PATH。重新打开终端即可使用。
 
+### Windows 浏览器操作依赖
+
+如需使用 DLC 的浏览器自动化功能（`browser_start`、`browser_view`、`browser_action`），Windows 用户需要额外安装 Python 环境：
+
+**1. 安装 Python**
+
+从官网下载并安装：https://www.python.org/downloads/
+
+> 安装时务必勾选 **"Add Python to PATH"**。
+
+安装完成后打开 CMD 验证：
+
+```cmd
+python --version
+```
+
+**2. 安装 Playwright**
+
+```cmd
+pip install playwright
+playwright install chromium
+```
+
+> macOS / Linux 用户通常已预装 Python，将上述命令中的 `python` 替换为 `python3`、`pip` 替换为 `pip3` 即可。
+
 ---
 
 ## 使用

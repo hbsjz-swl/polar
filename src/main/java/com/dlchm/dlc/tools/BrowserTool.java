@@ -26,6 +26,8 @@ public class BrowserTool {
     private static final int TIMEOUT_SECONDS = 120;
     private static final int CDP_PORT = 9222;
     private static final String CDP_URL = "http://localhost:" + CDP_PORT;
+    private static final boolean IS_WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
+    private static final String PYTHON_CMD = IS_WINDOWS ? "python" : "python3";
 
     private final ToolOutputTruncator truncator;
 
@@ -108,7 +110,7 @@ public class BrowserTool {
         }
 
         List<String> cmd = new ArrayList<>();
-        cmd.add("python3");
+        cmd.add(PYTHON_CMD);
         cmd.add(script.toString());
         cmd.add("view");
         cmd.add("--cdp-url");
@@ -148,7 +150,7 @@ public class BrowserTool {
         }
 
         List<String> cmd = new ArrayList<>();
-        cmd.add("python3");
+        cmd.add(PYTHON_CMD);
         cmd.add(script.toString());
         cmd.add("action");
         cmd.add("--cdp-url");
