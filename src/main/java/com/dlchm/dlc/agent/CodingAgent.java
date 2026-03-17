@@ -512,8 +512,8 @@ public class CodingAgent {
      * Ollama (Go) 的 JSON 解析器比 Java 更严格，不允许 \+非法字符（如 \空格、\: 等）。
      */
     private String sanitizeJson(String json) {
-        // 匹配 JSON 字符串内部的无效转义: \ 后面不是 " \ / b f n r t u
-        // 将孤立的 \ 替换为 \\
+        // 修复 JSON 字符串内部的无效转义序列（Ollama Go 解析器不允许 \+非法字符）
+        // 将孤立的 \ 替换为 \\，合法转义原样保留
         StringBuilder sb = new StringBuilder(json.length());
         boolean inString = false;
         for (int i = 0; i < json.length(); i++) {
@@ -526,7 +526,8 @@ public class CodingAgent {
                     char next = json.charAt(i + 1);
                     if (next == '"' || next == '\\' || next == '/' || next == 'b'
                             || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == 'u') {
-                        sb.append(c); // 合法转义，保留
+                        sb.append(c).append(next); // 合法转义，保留整对
+                        i++; // 跳过下一个字符，避免被重复处理
                     } else {
                         sb.append('\\').append('\\'); // 非法转义，双写反斜杠
                     }
