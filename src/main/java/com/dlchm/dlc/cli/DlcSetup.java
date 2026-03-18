@@ -91,7 +91,7 @@ public class DlcSetup {
 
         System.out.println();
         System.out.println(ANSI_CYAN + "  ╔══════════════════════════════════════╗" + ANSI_RESET);
-        System.out.println(ANSI_CYAN + "  ║        DLC - Initial Setup           ║" + ANSI_RESET);
+        System.out.println(ANSI_CYAN + "  ║        DLC - 初始化设置                ║" + ANSI_RESET);
         System.out.println(ANSI_CYAN + "  ╚══════════════════════════════════════╝" + ANSI_RESET);
         System.out.println();
         System.out.println(ANSI_DIM + "  Configure your LLM API connection." + ANSI_RESET);
