@@ -155,7 +155,9 @@ public class DlcCli {
         StringBuilder fullResponse = new StringBuilder();
 
         boolean[] inReasoning = {false};
-        StringBuilder thinkBuf = new StringBuilder();
+        long[] thinkStart = {0};
+        int[] thinkCount = {0};
+        String[] spinner = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
 
         agent.stream(session, userMessage)
                 .subscribe(
@@ -163,21 +165,19 @@ public class DlcCli {
                             if (event.type() == StreamEvent.Type.REASONING) {
                                 if (!inReasoning[0]) {
                                     inReasoning[0] = true;
+                                    thinkStart[0] = System.currentTimeMillis();
+                                    thinkCount[0] = 0;
                                 }
-                                thinkBuf.append(event.data().replace('\n', ' ').replace('\r', ' '));
-                                String display = thinkBuf.toString();
-                                int maxLen = 70;
-                                if (display.length() > maxLen) {
-                                    display = "..." + display.substring(display.length() - maxLen + 3);
-                                }
+                                thinkCount[0]++;
+                                long elapsed = (System.currentTimeMillis() - thinkStart[0]) / 1000;
+                                String spin = spinner[thinkCount[0] % spinner.length];
                                 System.out.print("\r" + ANSI_CYAN + "dlc> "
-                                        + ANSI_DIM + ANSI_ITALIC + display
+                                        + ANSI_DIM + spin + " thinking... (" + elapsed + "s)"
                                         + ANSI_RESET + "\033[K");
                                 System.out.flush();
                             } else {
                                 if (inReasoning[0]) {
                                     inReasoning[0] = false;
-                                    thinkBuf.setLength(0);
                                     System.out.print("\r\033[K");
                                     System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
                                 }
