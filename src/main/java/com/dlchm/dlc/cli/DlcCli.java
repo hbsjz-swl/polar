@@ -162,20 +162,24 @@ public class DlcCli {
                             if (event.type() == StreamEvent.Type.REASONING) {
                                 if (!inReasoning[0]) {
                                     inReasoning[0] = true;
+                                    System.out.print("\033[s"); // save cursor position
+                                    System.out.println();
                                     System.out.println(ANSI_DIM + "  ── thinking ──" + ANSI_RESET);
                                 }
                                 System.out.print(ANSI_DIM + ANSI_ITALIC + event.data() + ANSI_RESET);
                             } else {
                                 if (inReasoning[0]) {
                                     inReasoning[0] = false;
-                                    System.out.println();
-                                    System.out.println(ANSI_DIM + "  ─────────────" + ANSI_RESET);
+                                    System.out.print("\033[u\033[J"); // restore cursor, clear to end
                                 }
                                 System.out.print(event.data());
                                 fullResponse.append(event.data());
                             }
                         },
                         error -> {
+                            if (inReasoning[0]) {
+                                System.out.print("\033[u\033[J");
+                            }
                             System.out.println();
                             String msg = error.getMessage() != null ? error.getMessage() : "";
                             if (isModelError(msg)) {
@@ -195,6 +199,9 @@ public class DlcCli {
                             latch.countDown();
                         },
                         () -> {
+                            if (inReasoning[0]) {
+                                System.out.print("\033[u\033[J");
+                            }
                             System.out.println();
                             System.out.println();
                             latch.countDown();
