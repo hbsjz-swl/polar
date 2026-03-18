@@ -73,7 +73,7 @@ public class DlcSetup {
         try {
             Files.createDirectories(CONFIG_DIR);
             try (Writer writer = Files.newBufferedWriter(CONFIG_FILE)) {
-                config.store(writer, "DLC Configuration - 蒂爱嘉(北京)有限公司");
+                config.store(writer, "DLC Configuration - 蒂爱喜(北京)有限公司");
             }
             // Restrict file permissions (owner only)
             CONFIG_FILE.toFile().setReadable(false, false);

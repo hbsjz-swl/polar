@@ -25,6 +25,12 @@ public class DlcProperties {
     /** 工具输出最大字符数 */
     private int maxToolOutputChars = 30000;
 
+    /** 上下文窗口 token 数上限 */
+    private int contextWindowTokens = 30000;
+
+    /** 是否启用上下文自动压缩 */
+    private boolean contextCompressionEnabled = true;
+
     /** Channels 配置 */
     private ChannelsConfig channels = new ChannelsConfig();
 
@@ -38,6 +44,10 @@ public class DlcProperties {
     public void setBashTimeoutSeconds(int bashTimeoutSeconds) { this.bashTimeoutSeconds = bashTimeoutSeconds; }
     public int getMaxToolOutputChars() { return maxToolOutputChars; }
     public void setMaxToolOutputChars(int maxToolOutputChars) { this.maxToolOutputChars = maxToolOutputChars; }
+    public int getContextWindowTokens() { return contextWindowTokens; }
+    public void setContextWindowTokens(int contextWindowTokens) { this.contextWindowTokens = contextWindowTokens; }
+    public boolean isContextCompressionEnabled() { return contextCompressionEnabled; }
+    public void setContextCompressionEnabled(boolean contextCompressionEnabled) { this.contextCompressionEnabled = contextCompressionEnabled; }
     public ChannelsConfig getChannels() { return channels; }
     public void setChannels(ChannelsConfig channels) { this.channels = channels; }
 

@@ -1,5 +1,6 @@
 package com.dlchm.dlc.agent;
 
+import com.dlchm.dlc.config.DlcProperties;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.tools.MemoryTool;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -59,6 +60,8 @@ public class CodingAgent {
     private final ToolCallbackProvider toolCallbacks;
     private final SandboxPathResolver pathResolver;
     private final MemoryTool memoryTool;
+    private final DlcProperties dlcProperties;
+    private final ContextCompressor contextCompressor;
     private final String systemPromptTemplate;
     private volatile String baseUrl;
     private volatile String apiKey;
@@ -69,6 +72,7 @@ public class CodingAgent {
             ToolCallbackProvider toolCallbacks,
             SandboxPathResolver pathResolver,
             MemoryTool memoryTool,
+            DlcProperties dlcProperties,
             String systemPromptTemplate,
             @Value("${spring.ai.openai.base-url}") String baseUrl,
             @Value("${spring.ai.openai.api-key}") String apiKey,
@@ -76,6 +80,8 @@ public class CodingAgent {
         this.toolCallbacks = toolCallbacks;
         this.pathResolver = pathResolver;
         this.memoryTool = memoryTool;
+        this.dlcProperties = dlcProperties;
+        this.contextCompressor = new ContextCompressor(objectMapper);
         this.systemPromptTemplate = systemPromptTemplate;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
@@ -190,8 +196,34 @@ public class CodingAgent {
                 .put("role", "user").put("content", userMessage);
         messages.add(userMsg);
 
+        // 上下文压缩：估算超过阈值时触发
+        if (dlcProperties.isContextCompressionEnabled()) {
+            boolean compressed = contextCompressor.compressIfNeeded(
+                    messages, toolDefs, dlcProperties.getContextWindowTokens(),
+                    baseUrl, apiKey, model);
+            if (compressed) {
+                // 压缩后同步更新 Session 历史，避免下次消息重复压缩
+                List<ObjectNode> compressedHistory = new ArrayList<>();
+                for (int ci = 1; ci < messages.size(); ci++) { // 跳过 system
+                    JsonNode node = messages.get(ci);
+                    if (node instanceof ObjectNode on) {
+                        compressedHistory.add(on.deepCopy());
+                    }
+                }
+                // 去掉最后一条（当前 userMsg），因为 saveToHistory 会重新添加
+                if (!compressedHistory.isEmpty()) {
+                    compressedHistory.remove(compressedHistory.size() - 1);
+                }
+                session.clearHistory();
+                session.addMessages(compressedHistory);
+                sink.next(new StreamEvent(StreamEvent.Type.TOKEN, "[上下文已压缩]\n"));
+            }
+        }
+
         String finalAssistantText = null;
         int rollbackCount = 0;
+        boolean streamOptionsUnsupported = false;
+        TokenUsage tokenUsage = new TokenUsage();
         List<String> recentAssistantTexts = new ArrayList<>(); // 用于循环检测
 
         for (int i = 0; i < MAX_TOOL_ITERATIONS; i++) {
@@ -205,6 +237,22 @@ public class CodingAgent {
             }
             requestBody.put("temperature", 0.1);
             requestBody.put("stream", true);
+            // 请求返回 usage 信息（仅对支持 stream_options 的提供商生效，不支持的会忽略此字段或返回错误）
+            // 注意：Ollama 等部分提供商不支持此参数，为安全起见仅在首次尝试时添加，
+            // 若首次请求因此 400 则后续不再添加
+            if (!streamOptionsUnsupported) {
+                ObjectNode streamOptions = objectMapper.createObjectNode();
+                streamOptions.put("include_usage", true);
+                requestBody.set("stream_options", streamOptions);
+            }
+
+            // token 超 90% 时 warn
+            int estimatedTokens = TokenEstimator.estimateMessages(messages)
+                    + TokenEstimator.estimateToolDefs(toolDefs);
+            int warnThreshold = (int) (dlcProperties.getContextWindowTokens() * 0.9);
+            if (estimatedTokens > warnThreshold) {
+                log.warn("token 估算 {} 已超过上下文窗口 90%（阈值 {}）", estimatedTokens, warnThreshold);
+            }
 
             String requestJson = sanitizeJson(objectMapper.writeValueAsString(requestBody));
             HttpRequest request = HttpRequest.newBuilder()
@@ -224,6 +272,16 @@ public class CodingAgent {
                     errorBody = lines.collect(Collectors.joining("\n"));
                 }
                 String errorMsg = extractErrorMessage(errorBody);
+
+                // 400 错误可能是 stream_options 不被支持，标记后重试当前轮
+                if (response.statusCode() == 400 && !streamOptionsUnsupported
+                        && (errorMsg.contains("stream_options") || errorMsg.contains("Unrecognized")
+                            || errorMsg.contains("additional properties") || errorMsg.contains("unknown field"))) {
+                    streamOptionsUnsupported = true;
+                    log.info("API 不支持 stream_options，已禁用，重试当前请求");
+                    i--; // 回退循环计数，重试当前轮
+                    continue;
+                }
 
                 // 400/500 错误且不是第一轮 → 可能是上轮工具调用参数或内容导致，回退重试
                 if ((response.statusCode() == 400 || response.statusCode() == 500) && i > 0) {
@@ -275,6 +333,7 @@ public class CodingAgent {
             // Parse SSE stream
             StringBuilder contentBuilder = new StringBuilder();
             Map<Integer, ToolCallAccumulator> accumulators = new LinkedHashMap<>();
+            final TokenUsage iterationUsage = tokenUsage; // effectively final ref for lambda
 
             try (var lines = response.body()) {
                 lines.forEach(line -> {
@@ -284,6 +343,16 @@ public class CodingAgent {
 
                     try {
                         JsonNode chunk = objectMapper.readTree(data);
+
+                        // 提取 usage 信息（stream_options.include_usage=true 时在最后一个 chunk）
+                        JsonNode usage = chunk.path("usage");
+                        if (usage.isObject() && usage.has("total_tokens")) {
+                            iterationUsage.add(
+                                    usage.path("prompt_tokens").asInt(0),
+                                    usage.path("completion_tokens").asInt(0),
+                                    usage.path("total_tokens").asInt(0));
+                        }
+
                         JsonNode delta = chunk.path("choices").path(0).path("delta");
 
                         // Text content → emit immediately
@@ -324,6 +393,10 @@ public class CodingAgent {
             // No tool calls → done, save to conversation history
             if (accumulators.isEmpty()) {
                 finalAssistantText = contentBuilder.toString();
+                // 发送 token 用量事件
+                if (tokenUsage.hasData()) {
+                    sink.next(new StreamEvent(StreamEvent.Type.USAGE, tokenUsage.toString()));
+                }
                 saveToHistory(session, userMsg, messages, finalAssistantText);
                 return;
             }
@@ -409,10 +482,27 @@ public class CodingAgent {
                         .put("tool_call_id", callId)
                         .put("content", result));
             }
+
+            // 工具循环中：仅当 token 超过 90% 阈值时才触发压缩（避免每轮都调 LLM 摘要）
+            if (dlcProperties.isContextCompressionEnabled()) {
+                int loopTokens = TokenEstimator.estimateMessages(messages)
+                        + TokenEstimator.estimateToolDefs(toolDefs);
+                if (loopTokens > (int) (dlcProperties.getContextWindowTokens() * 0.9)) {
+                    boolean compressed = contextCompressor.compressIfNeeded(
+                            messages, toolDefs, dlcProperties.getContextWindowTokens(),
+                            baseUrl, apiKey, model);
+                    if (compressed) {
+                        sink.next(new StreamEvent(StreamEvent.Type.TOKEN, "[上下文已压缩]\n"));
+                    }
+                }
+            }
             // Loop continues → next streaming request with tool results
         }
 
         // 达到最大迭代次数，仍保存对话记录
+        if (tokenUsage.hasData()) {
+            sink.next(new StreamEvent(StreamEvent.Type.USAGE, tokenUsage.toString()));
+        }
         saveToHistory(session, userMsg, messages, "(max tool iterations reached)");
         throw new RuntimeException("Maximum tool iterations (" + MAX_TOOL_ITERATIONS + ") reached.");
     }

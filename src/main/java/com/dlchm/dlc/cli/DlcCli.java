@@ -22,7 +22,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * DLC 终端交互界面。
- * 蒂爱嘉(北京)有限公司
+ * 蒂爱喜(北京)有限公司
  */
 @Component
 public class DlcCli {
@@ -157,11 +157,16 @@ public class DlcCli {
         boolean[] inReasoning = {false};
         long[] thinkStart = {0};
         int[] thinkCount = {0};
+        String[] usageInfo = {null};
         String[] spinner = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
 
         agent.stream(session, userMessage)
                 .subscribe(
                         event -> {
+                            if (event.type() == StreamEvent.Type.USAGE) {
+                                usageInfo[0] = event.data();
+                                return;
+                            }
                             if (event.type() == StreamEvent.Type.REASONING) {
                                 if (!inReasoning[0]) {
                                     inReasoning[0] = true;
@@ -213,6 +218,9 @@ public class DlcCli {
                                 System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
                             }
                             System.out.println();
+                            if (usageInfo[0] != null) {
+                                System.out.println(ANSI_DIM + usageInfo[0] + ANSI_RESET);
+                            }
                             System.out.println();
                             latch.countDown();
                         }
