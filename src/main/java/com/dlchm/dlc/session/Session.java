@@ -11,7 +11,7 @@ import java.util.UUID;
  */
 public class Session {
 
-    private static final int DEFAULT_MAX_MESSAGES = 40;
+    private static final int DEFAULT_MAX_MESSAGES = 100;
 
     private final String id;
     private final String channelType;
@@ -66,9 +66,31 @@ public class Session {
         touch();
     }
 
+    /**
+     * 原子批量添加消息，避免逐条 add 时 trimHistory 在中间截断 tool_call/tool 对。
+     */
+    public synchronized void addMessages(List<ObjectNode> messages) {
+        for (ObjectNode msg : messages) {
+            history.add(msg.deepCopy());
+        }
+        trimHistory(DEFAULT_MAX_MESSAGES);
+        touch();
+    }
+
     public synchronized void trimHistory(int maxMessages) {
         while (history.size() > maxMessages) {
             history.remove(0);
+        }
+        // 确保历史不以孤立的 tool result 或带 tool_calls 的 assistant 开头
+        // 否则 API 会因缺少配对消息而报错
+        while (!history.isEmpty()) {
+            ObjectNode first = history.get(0);
+            String role = first.path("role").asText("");
+            if ("tool".equals(role) || ("assistant".equals(role) && first.has("tool_calls"))) {
+                history.remove(0);
+            } else {
+                break;
+            }
         }
     }
 

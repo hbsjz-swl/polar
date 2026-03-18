@@ -46,7 +46,7 @@ public class CodingAgent {
     private static final int MAX_ROLLBACKS = 3;
     private static final int MAX_TOOL_RESULT_LENGTH = 4000;
     private static final int LOOP_DETECT_THRESHOLD = 3;
-    private static final int MAX_HISTORY_MESSAGES = 40;
+    private static final int MAX_HISTORY_TOOL_RESULT_LENGTH = 800;
     private static final List<String> AGENT_MD_NAMES = List.of(
             "AGENT.md", "agent.md", "Agent.md"
     );
@@ -324,7 +324,7 @@ public class CodingAgent {
             // No tool calls → done, save to conversation history
             if (accumulators.isEmpty()) {
                 finalAssistantText = contentBuilder.toString();
-                saveToHistory(session, userMsg, finalAssistantText);
+                saveToHistory(session, userMsg, messages, finalAssistantText);
                 return;
             }
 
@@ -346,7 +346,7 @@ public class CodingAgent {
                         log.warn("Loop detected: assistant repeated similar output {} times, breaking", sameCount);
                         sink.next(new StreamEvent(StreamEvent.Type.TOKEN,
                                 "\n\n[检测到循环，自动终止。请尝试简化指令或更换模型。]"));
-                        saveToHistory(session, userMsg, currentText + "\n[循环终止]");
+                        saveToHistory(session, userMsg, messages, currentText + "\n[循环终止]");
                         return;
                     }
                 }
@@ -413,17 +413,69 @@ public class CodingAgent {
         }
 
         // 达到最大迭代次数，仍保存对话记录
-        saveToHistory(session, userMsg, "(max tool iterations reached)");
+        saveToHistory(session, userMsg, messages, "(max tool iterations reached)");
         throw new RuntimeException("Maximum tool iterations (" + MAX_TOOL_ITERATIONS + ") reached.");
     }
 
     // ==================== Conversation History ====================
 
-    private void saveToHistory(Session session, ObjectNode userMsg, String assistantText) {
-        session.addMessage(userMsg);
-        session.addMessage(objectMapper.createObjectNode()
-                .put("role", "assistant")
-                .put("content", assistantText != null ? assistantText : ""));
+    private void saveToHistory(Session session, ObjectNode userMsg, ArrayNode messages, String finalAssistantText) {
+        // 从 messages 中提取当前轮次的消息（userMsg 之后的所有 assistant+tool_calls、tool result）
+        List<ObjectNode> turnMessages = new ArrayList<>();
+        turnMessages.add(userMsg);
+
+        // 找到 userMsg 在 messages 中的位置
+        int userMsgIndex = -1;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if (messages.get(i) == userMsg) {
+                userMsgIndex = i;
+                break;
+            }
+        }
+
+        boolean hasToolCalls = false;
+        if (userMsgIndex >= 0) {
+            for (int i = userMsgIndex + 1; i < messages.size(); i++) {
+                JsonNode msg = messages.get(i);
+                if (!(msg instanceof ObjectNode)) continue;
+                ObjectNode objMsg = (ObjectNode) msg;
+                String role = objMsg.path("role").asText("");
+
+                // 过滤掉回退恢复的 [系统提示] 消息
+                if ("user".equals(role) && objMsg.path("content").asText("").startsWith("[系统提示]")) {
+                    continue;
+                }
+
+                if ("assistant".equals(role) && objMsg.has("tool_calls")) {
+                    hasToolCalls = true;
+                    turnMessages.add(objMsg);
+                } else if ("tool".equals(role)) {
+                    // 截断 tool result 到较短长度以节省 token
+                    String content = objMsg.path("content").asText("");
+                    if (content.length() > MAX_HISTORY_TOOL_RESULT_LENGTH) {
+                        objMsg = objMsg.deepCopy();
+                        objMsg.put("content", content.substring(0, MAX_HISTORY_TOOL_RESULT_LENGTH)
+                                + "\n...(历史截断，共 " + content.length() + " 字符)");
+                    }
+                    turnMessages.add(objMsg);
+                }
+            }
+        }
+
+        // 添加最终的纯文本 assistant 回复
+        if (finalAssistantText != null && !finalAssistantText.isEmpty()) {
+            turnMessages.add(objectMapper.createObjectNode()
+                    .put("role", "assistant")
+                    .put("content", finalAssistantText));
+        } else if (!hasToolCalls) {
+            // 无工具调用且无文本，仍保存空 assistant 回复
+            turnMessages.add(objectMapper.createObjectNode()
+                    .put("role", "assistant")
+                    .put("content", ""));
+        }
+
+        // 批量添加，避免逐条 add 时 trimHistory 在中间截断 tool_call/tool 对
+        session.addMessages(turnMessages);
     }
 
     // ==================== Tool call chunk accumulator ====================
