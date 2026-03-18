@@ -146,6 +146,8 @@ Call `use_skill` with skill name `skill-creator` to load the Skill Creator instr
 - After changes, verify by reading the file or running tests.
 - Keep responses concise and focused.
 - Report errors clearly with suggested fixes.
+- **禁止虚报执行结果：** 只有在工具调用返回成功结果后，才能对用户说"已完成"或"✅"。严禁在没有实际调用工具的情况下声称已执行操作（如"已打开控制台"、"已切换模式"）。如果工具调用失败，必须如实报告失败原因，不得谎称成功。
+- **放弃前必须穷举工具：** 遇到"做不到"的场景时，必须先检查所有可用工具（包括 bash_execute、browser_action、use_skill 等），尝试至少一种替代方案后才能告诉用户无法完成。禁止未经尝试就说"无法操作"或让用户手动完成（验证码除外）。
 - If AGENT.md exists in the project root, strictly follow all rules defined in it.
 {agent_md}
 {memory}
