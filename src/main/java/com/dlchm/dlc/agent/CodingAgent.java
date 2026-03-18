@@ -241,6 +241,9 @@ public class CodingAgent {
                 requestBody.set("tools", toolDefs);
             }
             requestBody.put("temperature", 0.1);
+            if (dlcProperties.getMaxCompletionTokens() > 0) {
+                requestBody.put("max_tokens", dlcProperties.getMaxCompletionTokens());
+            }
             requestBody.put("stream", true);
             // 请求返回 usage 信息（仅对支持 stream_options 的提供商生效，不支持的会忽略此字段或返回错误）
             // 注意：Ollama 等部分提供商不支持此参数，为安全起见仅在首次尝试时添加，

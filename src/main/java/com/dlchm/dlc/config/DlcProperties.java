@@ -34,6 +34,9 @@ public class DlcProperties {
     /** 是否启用视觉能力（截图自动注入多模态消息） */
     private boolean visionEnabled = true;
 
+    /** 单次 API 调用最大 completion tokens（0 表示不设置，使用 API 默认值） */
+    private int maxCompletionTokens = 8192;
+
     /** Channels 配置 */
     private ChannelsConfig channels = new ChannelsConfig();
 
@@ -53,6 +56,8 @@ public class DlcProperties {
     public void setContextCompressionEnabled(boolean contextCompressionEnabled) { this.contextCompressionEnabled = contextCompressionEnabled; }
     public boolean isVisionEnabled() { return visionEnabled; }
     public void setVisionEnabled(boolean visionEnabled) { this.visionEnabled = visionEnabled; }
+    public int getMaxCompletionTokens() { return maxCompletionTokens; }
+    public void setMaxCompletionTokens(int maxCompletionTokens) { this.maxCompletionTokens = maxCompletionTokens; }
     public ChannelsConfig getChannels() { return channels; }
     public void setChannels(ChannelsConfig channels) { this.channels = channels; }
 

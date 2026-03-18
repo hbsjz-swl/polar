@@ -21,6 +21,7 @@ dlc:
   context-window-tokens: ${DLC_CONTEXT_WINDOW:131072}
   context-compression-enabled: ${DLC_CONTEXT_COMPRESSION:true}
   vision-enabled: ${DLC_VISION:true}
+  max-completion-tokens: ${DLC_MAX_COMPLETION_TOKENS:8192}
   channels:
     wecom:
       enabled: ${DLC_WECOM_ENABLED:false}
