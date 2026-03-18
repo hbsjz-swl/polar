@@ -20,10 +20,13 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,6 +51,8 @@ public class CodingAgent {
     private static final int MAX_TOOL_RESULT_LENGTH = 4000;
     private static final int LOOP_DETECT_THRESHOLD = 3;
     private static final int MAX_HISTORY_TOOL_RESULT_LENGTH = 800;
+    private static final Pattern SCREENSHOT_PATTERN = Pattern.compile("\\[SCREENSHOT:([^\\]]+)]");
+    private static final int MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
     private static final List<String> AGENT_MD_NAMES = List.of(
             "AGENT.md", "agent.md", "Agent.md"
     );
@@ -483,6 +488,11 @@ public class CodingAgent {
                         .put("content", result));
             }
 
+            // Vision: 检测工具结果中的截图，注入多模态消息让模型"看到"图片
+            if (dlcProperties.isVisionEnabled()) {
+                injectScreenshotImages(messages);
+            }
+
             // 工具循环中：仅当 token 超过 90% 阈值时才触发压缩（避免每轮都调 LLM 摘要）
             if (dlcProperties.isContextCompressionEnabled()) {
                 int loopTokens = TokenEstimator.estimateMessages(messages)
@@ -533,6 +543,10 @@ public class CodingAgent {
 
                 // 过滤掉回退恢复的 [系统提示] 消息
                 if ("user".equals(role) && objMsg.path("content").asText("").startsWith("[系统提示]")) {
+                    continue;
+                }
+                // 过滤掉多模态截图消息（content 为 array 类型，体积过大不宜存入历史）
+                if ("user".equals(role) && objMsg.path("content").isArray()) {
                     continue;
                 }
 
@@ -697,6 +711,75 @@ public class CodingAgent {
             return "";
         }
         return "\n\n## Project Rules (from AGENT.md)\n\n" + agentMdContent;
+    }
+
+    // ==================== Vision: Screenshot → Multimodal ====================
+
+    /**
+     * 扫描最近的 tool 消息，检测 [SCREENSHOT:path] 标记。
+     * 对每个截图读取文件、base64 编码，注入多模态 user 消息让模型"看到"图片。
+     */
+    private void injectScreenshotImages(ArrayNode messages) {
+        // 从末尾向前找所有连续的 tool 消息
+        List<String> screenshotPaths = new ArrayList<>();
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            JsonNode msg = messages.get(i);
+            if (!"tool".equals(msg.path("role").asText(""))) break;
+            String content = msg.path("content").asText("");
+            Matcher m = SCREENSHOT_PATTERN.matcher(content);
+            while (m.find()) {
+                screenshotPaths.add(m.group(1));
+            }
+        }
+        if (screenshotPaths.isEmpty()) return;
+
+        // 只取最后一张截图（避免注入过多图片膨胀上下文）
+        String lastScreenshot = screenshotPaths.get(screenshotPaths.size() - 1);
+        ObjectNode imageMsg = buildMultimodalImageMessage(lastScreenshot);
+        if (imageMsg != null) {
+            messages.add(imageMsg);
+            log.info("注入截图多模态消息: {}", lastScreenshot);
+        }
+    }
+
+    /**
+     * 读取图片文件，构建 OpenAI 兼容的多模态 user 消息。
+     */
+    private ObjectNode buildMultimodalImageMessage(String imagePath) {
+        try {
+            Path path = Path.of(imagePath.trim());
+            if (!Files.exists(path)) {
+                log.warn("截图文件不存在: {}", imagePath);
+                return null;
+            }
+            byte[] bytes = Files.readAllBytes(path);
+            if (bytes.length > MAX_IMAGE_SIZE) {
+                log.warn("截图文件过大({}MB)，跳过: {}", bytes.length / 1024 / 1024, imagePath);
+                return null;
+            }
+            String base64 = Base64.getEncoder().encodeToString(bytes);
+            String mimeType = imagePath.endsWith(".jpg") || imagePath.endsWith(".jpeg")
+                    ? "image/jpeg" : "image/png";
+            String dataUrl = "data:" + mimeType + ";base64," + base64;
+
+            ObjectNode msg = objectMapper.createObjectNode();
+            msg.put("role", "user");
+            ArrayNode content = objectMapper.createArrayNode();
+            content.add(objectMapper.createObjectNode()
+                    .put("type", "text")
+                    .put("text", "[系统：以上工具调用产生了浏览器截图，请仔细分析截图内容。"
+                            + "如果看到验证码，请识别验证码要求并使用 click_xy 在正确的坐标位置点击完成验证。"
+                            + "截图坐标系：左上角为(0,0)，向右为x正方向，向下为y正方向。]"));
+            ObjectNode imagePart = objectMapper.createObjectNode();
+            imagePart.put("type", "image_url");
+            imagePart.set("image_url", objectMapper.createObjectNode().put("url", dataUrl));
+            content.add(imagePart);
+            msg.set("content", content);
+            return msg;
+        } catch (Exception e) {
+            log.warn("读取截图失败: {}", e.getMessage());
+            return null;
+        }
     }
 
 }

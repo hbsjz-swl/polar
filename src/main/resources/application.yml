@@ -18,8 +18,9 @@ dlc:
   permission-mode: ${DLC_PERMISSION_MODE:STANDARD}
   bash-timeout-seconds: ${DLC_BASH_TIMEOUT:30}
   max-tool-output-chars: ${DLC_MAX_OUTPUT:30000}
-  context-window-tokens: ${DLC_CONTEXT_WINDOW:30000}
+  context-window-tokens: ${DLC_CONTEXT_WINDOW:131072}
   context-compression-enabled: ${DLC_CONTEXT_COMPRESSION:true}
+  vision-enabled: ${DLC_VISION:true}
   channels:
     wecom:
       enabled: ${DLC_WECOM_ENABLED:false}

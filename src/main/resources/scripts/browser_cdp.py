@@ -257,8 +257,8 @@ def view_page(page, screenshot_path=None):
     # ===== 截图 =====
     if screenshot_path:
         try:
-            page.screenshot(path=screenshot_path, full_page=True)
-            info["screenshot"] = screenshot_path
+            page.screenshot(path=screenshot_path, full_page=False)
+            info["screenshot"] = f"{screenshot_path} [SCREENSHOT:{screenshot_path}]"
         except Exception as e:
             info["screenshot_error"] = str(e)
 
@@ -293,6 +293,17 @@ def perform_actions(page, actions, screenshot_path=None):
                 except:
                     pass
                 step["result"] = f"Clicked: {selector}"
+                step["new_url"] = page.url
+
+            elif action == "click_xy":
+                x = act.get("x", 0)
+                y = act.get("y", 0)
+                page.mouse.click(x, y)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except:
+                    pass
+                step["result"] = f"Clicked at ({x}, {y})"
                 step["new_url"] = page.url
 
             elif action == "fill":
@@ -330,8 +341,8 @@ def perform_actions(page, actions, screenshot_path=None):
 
             elif action == "screenshot":
                 path = act.get("path", f"/tmp/step_{i + 1}.png")
-                page.screenshot(path=path, full_page=act.get("full_page", True))
-                step["result"] = f"Screenshot saved: {path}"
+                page.screenshot(path=path, full_page=act.get("full_page", False))
+                step["result"] = f"Screenshot saved: {path} [SCREENSHOT:{path}]"
 
             elif action == "get_text":
                 text = page.locator(selector).inner_text()
@@ -370,8 +381,8 @@ def perform_actions(page, actions, screenshot_path=None):
 
     if screenshot_path:
         try:
-            page.screenshot(path=screenshot_path, full_page=True)
-            final["screenshot"] = screenshot_path
+            page.screenshot(path=screenshot_path, full_page=False)
+            final["screenshot"] = f"{screenshot_path} [SCREENSHOT:{screenshot_path}]"
         except Exception as e:
             final["screenshot_error"] = str(e)
 

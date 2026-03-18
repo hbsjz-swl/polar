@@ -25,11 +25,14 @@ public class DlcProperties {
     /** 工具输出最大字符数 */
     private int maxToolOutputChars = 30000;
 
-    /** 上下文窗口 token 数上限 */
-    private int contextWindowTokens = 30000;
+    /** 上下文窗口 token 数上限（应匹配实际模型的上下文长度） */
+    private int contextWindowTokens = 131072;
 
     /** 是否启用上下文自动压缩 */
     private boolean contextCompressionEnabled = true;
+
+    /** 是否启用视觉能力（截图自动注入多模态消息） */
+    private boolean visionEnabled = true;
 
     /** Channels 配置 */
     private ChannelsConfig channels = new ChannelsConfig();
@@ -48,6 +51,8 @@ public class DlcProperties {
     public void setContextWindowTokens(int contextWindowTokens) { this.contextWindowTokens = contextWindowTokens; }
     public boolean isContextCompressionEnabled() { return contextCompressionEnabled; }
     public void setContextCompressionEnabled(boolean contextCompressionEnabled) { this.contextCompressionEnabled = contextCompressionEnabled; }
+    public boolean isVisionEnabled() { return visionEnabled; }
+    public void setVisionEnabled(boolean visionEnabled) { this.visionEnabled = visionEnabled; }
     public ChannelsConfig getChannels() { return channels; }
     public void setChannels(ChannelsConfig channels) { this.channels = channels; }
 

@@ -129,7 +129,8 @@ public class BrowserTool {
 
     @Tool(name = "browser_action", description = "Perform actions on the current browser page. "
             + "Call browser_view first to understand the page layout, then use this to interact. "
-            + "Supported actions: goto (navigate to URL), click, fill, select, check, uncheck, hover, "
+            + "Supported actions: goto (navigate to URL), click, click_xy (click at pixel coordinates x,y), "
+            + "fill, select, check, uncheck, hover, "
             + "press, scroll, screenshot, get_text, get_attr, evaluate, wait. "
             + "Actions execute in sequence. The browser stays open after actions complete - "
             + "login state, cookies, and page state are PRESERVED for next call.")
@@ -139,6 +140,7 @@ public class BrowserTool {
                     + "Fill + Click: [{\"action\":\"fill\",\"selector\":\"#username\",\"value\":\"admin\"},"
                     + "{\"action\":\"fill\",\"selector\":\"#password\",\"value\":\"123\"},"
                     + "{\"action\":\"click\",\"selector\":\"button[type=submit]\"}]\n"
+                    + "Click coordinates: [{\"action\":\"click_xy\",\"x\":120,\"y\":340}]\n"
                     + "Get text: [{\"action\":\"get_text\",\"selector\":\".result\"}]\n"
                     + "Scroll: [{\"action\":\"scroll\",\"direction\":\"down\",\"amount\":500}]\n"
                     + "Selectors: text=Submit, #id, .class, input[name=email], button:has-text(\"OK\")") String actions,
