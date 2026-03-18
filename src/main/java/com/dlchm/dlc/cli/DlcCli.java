@@ -155,6 +155,7 @@ public class DlcCli {
         StringBuilder fullResponse = new StringBuilder();
 
         boolean[] inReasoning = {false};
+        StringBuilder thinkBuf = new StringBuilder();
 
         agent.stream(session, userMessage)
                 .subscribe(
@@ -162,15 +163,23 @@ public class DlcCli {
                             if (event.type() == StreamEvent.Type.REASONING) {
                                 if (!inReasoning[0]) {
                                     inReasoning[0] = true;
-                                    System.out.print("\033[s"); // save cursor position
-                                    System.out.println();
-                                    System.out.println(ANSI_DIM + "  ── thinking ──" + ANSI_RESET);
                                 }
-                                System.out.print(ANSI_DIM + ANSI_ITALIC + event.data() + ANSI_RESET);
+                                thinkBuf.append(event.data().replace('\n', ' ').replace('\r', ' '));
+                                String display = thinkBuf.toString();
+                                int maxLen = 70;
+                                if (display.length() > maxLen) {
+                                    display = "..." + display.substring(display.length() - maxLen + 3);
+                                }
+                                System.out.print("\r" + ANSI_CYAN + "dlc> "
+                                        + ANSI_DIM + ANSI_ITALIC + display
+                                        + ANSI_RESET + "\033[K");
+                                System.out.flush();
                             } else {
                                 if (inReasoning[0]) {
                                     inReasoning[0] = false;
-                                    System.out.print("\033[u\033[J"); // restore cursor, clear to end
+                                    thinkBuf.setLength(0);
+                                    System.out.print("\r\033[K");
+                                    System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
                                 }
                                 System.out.print(event.data());
                                 fullResponse.append(event.data());
@@ -178,7 +187,7 @@ public class DlcCli {
                         },
                         error -> {
                             if (inReasoning[0]) {
-                                System.out.print("\033[u\033[J");
+                                System.out.print("\r\033[K");
                             }
                             System.out.println();
                             String msg = error.getMessage() != null ? error.getMessage() : "";
@@ -200,7 +209,8 @@ public class DlcCli {
                         },
                         () -> {
                             if (inReasoning[0]) {
-                                System.out.print("\033[u\033[J");
+                                System.out.print("\r\033[K");
+                                System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
                             }
                             System.out.println();
                             System.out.println();
