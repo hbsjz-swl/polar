@@ -42,6 +42,7 @@ public class DlcCli {
     private static final String ANSI_RESET = "\u001B[0m";
     private static final String ANSI_CYAN = "\u001B[36m";
     private static final String ANSI_DIM = "\u001B[2m";
+    private static final String ANSI_ITALIC = "\u001B[3m";
     private static final String ANSI_GREEN = "\u001B[32m";
     private static final String ANSI_YELLOW = "\u001B[33m";
 
@@ -153,12 +154,23 @@ public class DlcCli {
         CountDownLatch latch = new CountDownLatch(1);
         StringBuilder fullResponse = new StringBuilder();
 
+        boolean[] inReasoning = {false};
+
         agent.stream(session, userMessage)
                 .subscribe(
                         event -> {
                             if (event.type() == StreamEvent.Type.REASONING) {
-                                System.out.print(ANSI_DIM + event.data() + ANSI_RESET);
+                                if (!inReasoning[0]) {
+                                    inReasoning[0] = true;
+                                    System.out.println(ANSI_DIM + "  ── thinking ──" + ANSI_RESET);
+                                }
+                                System.out.print(ANSI_DIM + ANSI_ITALIC + event.data() + ANSI_RESET);
                             } else {
+                                if (inReasoning[0]) {
+                                    inReasoning[0] = false;
+                                    System.out.println();
+                                    System.out.println(ANSI_DIM + "  ─────────────" + ANSI_RESET);
+                                }
                                 System.out.print(event.data());
                                 fullResponse.append(event.data());
                             }
