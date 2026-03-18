@@ -48,7 +48,7 @@ public class DlcApplication {
             // 端口可用，无需处理
         } catch (IOException e) {
             // 端口被占用，查找并杀掉进程
-            System.err.println("Port " + port + " is in use, killing old process...");
+//            System.err.println("Port " + port + " is in use, killing old process...");
             try {
                 Process proc = Runtime.getRuntime().exec(new String[]{
                         "/bin/sh", "-c", "lsof -ti:" + port + " | xargs kill -9 2>/dev/null"
