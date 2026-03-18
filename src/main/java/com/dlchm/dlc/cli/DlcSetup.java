@@ -128,7 +128,7 @@ public class DlcSetup {
         config.setProperty(KEY_MODEL, model);
 
         System.out.println();
-        System.out.println(ANSI_GREEN + "  Configuration saved!" + ANSI_RESET);
+        System.out.println(ANSI_GREEN + "  设置成功!" + ANSI_RESET);
         System.out.println();
 
         return config;
