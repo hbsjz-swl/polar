@@ -42,7 +42,7 @@ public class CodingAgent {
 
     private static final Logger log = LoggerFactory.getLogger(CodingAgent.class);
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-    private static final int MAX_TOOL_ITERATIONS = 30;
+    private static final int MAX_TOOL_ITERATIONS = 100;
     private static final int MAX_ROLLBACKS = 3;
     private static final int MAX_TOOL_RESULT_LENGTH = 4000;
     private static final int LOOP_DETECT_THRESHOLD = 3;
