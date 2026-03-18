@@ -2,7 +2,7 @@
 
 本地 AI 办公助手，在终端中通过自然语言操作代码。所有文件操作在本地执行，仅 LLM 推理通过 API 调用。
 
-**蒂爱嘉(北京)有限公司**
+**蒂爱喜(北京)科技有限公司**
 
 ---
 
@@ -11,6 +11,9 @@
 - 读取/写入/编辑文件
 - 代码搜索（文件名搜索 + 内容正则搜索）
 - 执行 Shell 命令（带沙箱保护）
+- 浏览器自动化（打开网页、点击、填写表单、截图等）
+- 持久记忆（跨会话记住项目信息和用户偏好）
+- 技能系统（安装/使用可复用的自动化工作流）
 - 支持任意 OpenAI 兼容 API（通义千问、DeepSeek、GPT-4o、Ollama 等）
 - 首次启动交互式配置，无需手动编辑配置文件
 
@@ -102,7 +105,7 @@ dlc
 
   API Base URL [https://dashscope.aliyuncs.com/compatible-mode]:
   API Key: ********
-  Model name [qwen3.5-plus-2026-02-15]:
+  Model name [指令模型名称，例如 qwen3.5-plus-2026-02-15]:
 
   Configuration saved!
 ```
@@ -126,8 +129,9 @@ dlc
 | 命令 | 说明 |
 |------|------|
 | `/config` | 重新配置 API 连接 |
-| `/clear` | 清屏 |
-| `/quit` | 退出 |
+| `/clear` | 清屏并清除对话历史 |
+| `/quit` 或 `/exit` | 退出 |
+| `/forget` | 清除所有记忆 |
 
 ---
 
@@ -203,12 +207,12 @@ Test-Path "$env:USERPROFILE\.dlc"   # 应该返回 False
 
 ```
 ~/.dlc/
-├── dlc.jar              # 主程序
-├── bin/dlc              # 启动脚本（macOS/Linux）
-├── bin/dlc.cmd          # 启动脚本（Windows）
-├── config.properties    # API 配置（首次启动自动生成）
-├── memory.md            # 全局记忆（跨项目，自动生成）
-└── skills/              # 技能脚本（自动提取）
+├── dlc.jar             
+├── bin/dlc              
+├── bin/dlc.cmd          
+├── config.properties  
+├── memory.md           
+└── skills/             
 ```
 
 项目级文件（在工作区目录下）：
@@ -223,4 +227,4 @@ Test-Path "$env:USERPROFILE\.dlc"   # 应该返回 False
 
 ## License
 
-Copyright (c) 2026 蒂爱嘉(北京)有限公司. All rights reserved.
+Copyright (c) 2026 蒂爱喜(北京)科技有限公司. All rights reserved.
