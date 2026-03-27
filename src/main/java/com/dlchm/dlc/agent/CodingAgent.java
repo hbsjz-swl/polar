@@ -50,6 +50,7 @@ public class CodingAgent {
     private static final int MAX_ROLLBACKS = 3;
     private static final int MAX_TOOL_RESULT_LENGTH = 4000;
     private static final int LOOP_DETECT_THRESHOLD = 3;
+    private static final int MAX_SAME_TOOL_FAILURES = 2;
     private static final int MAX_HISTORY_TOOL_RESULT_LENGTH = 800;
     private static final Pattern SCREENSHOT_PATTERN = Pattern.compile("\\[SCREENSHOT:([^\\]]+)]");
     private static final int MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -230,6 +231,7 @@ public class CodingAgent {
         boolean streamOptionsUnsupported = false;
         TokenUsage tokenUsage = new TokenUsage();
         List<String> recentAssistantTexts = new ArrayList<>(); // 用于循环检测
+        Map<String, Integer> repeatedToolFailures = new LinkedHashMap<>();
 
         for (int i = 0; i < MAX_TOOL_ITERATIONS; i++) {
             ObjectNode requestBody = objectMapper.createObjectNode();
@@ -464,6 +466,7 @@ public class CodingAgent {
             messages.add(assistantMsg);
 
             // Execute tools
+            List<ToolExecutionResult> toolExecutionResults = new ArrayList<>();
             for (ToolCallAccumulator acc : accumulators.values()) {
                 String argsStr = acc.arguments.toString();
                 ToolCallback callback = toolMap.get(acc.name);
@@ -484,12 +487,15 @@ public class CodingAgent {
                             + "\n...(结果已截断，共 " + result.length() + " 字符)";
                 }
 
+                toolExecutionResults.add(new ToolExecutionResult(acc.name, argsStr, result));
                 String callId = acc.id != null ? acc.id : "call_" + System.nanoTime();
                 messages.add(objectMapper.createObjectNode()
                         .put("role", "tool")
                         .put("tool_call_id", callId)
                         .put("content", result));
             }
+
+            appendToolFailureReflection(messages, toolExecutionResults, repeatedToolFailures);
 
             // Vision: 检测工具结果中的截图，注入多模态消息让模型"看到"图片
             if (dlcProperties.isVisionEnabled()) {
@@ -592,6 +598,8 @@ public class CodingAgent {
         String name;
         final StringBuilder arguments = new StringBuilder();
     }
+
+    private record ToolExecutionResult(String toolName, String arguments, String result) {}
 
     // ==================== Helpers ====================
 
@@ -707,6 +715,78 @@ public class CodingAgent {
         } catch (Exception e) {
             return responseBody;
         }
+    }
+
+    private void appendToolFailureReflection(ArrayNode messages, List<ToolExecutionResult> results,
+                                             Map<String, Integer> repeatedToolFailures) {
+        List<ToolExecutionResult> failed = results.stream()
+                .filter(r -> isToolFailure(r.result()))
+                .toList();
+        if (failed.isEmpty()) {
+            return;
+        }
+
+        StringBuilder hint = new StringBuilder("[系统提示] 上一轮工具调用出现错误。先反思失败原因，再决定下一步。\n");
+        hint.append("要求：\n");
+        hint.append("1. 先根据错误信息判断是路径错误、参数错误、权限限制、环境缺失还是页面状态变化。\n");
+        hint.append("2. 如果可以修正，请改用不同参数或先补充读取/查看动作后再重试。\n");
+        hint.append("3. 不要原样重复刚刚失败的同一个工具调用。\n");
+        hint.append("4. 如果同类错误已经重复出现，请停止盲目重试，向用户解释卡点和建议。\n");
+        hint.append("本轮失败摘要：\n");
+
+        boolean shouldStopRetrying = false;
+        for (ToolExecutionResult failure : failed) {
+            String signature = buildToolFailureSignature(failure.toolName(), failure.arguments(), failure.result());
+            int count = repeatedToolFailures.getOrDefault(signature, 0) + 1;
+            repeatedToolFailures.put(signature, count);
+            if (count >= MAX_SAME_TOOL_FAILURES) {
+                shouldStopRetrying = true;
+            }
+            hint.append("- 工具 `").append(failure.toolName()).append("` 第")
+                    .append(count).append(" 次失败：")
+                    .append(summarizeToolResult(failure.result())).append('\n');
+        }
+
+        if (shouldStopRetrying) {
+            hint.append("同一失败已重复出现。禁止再次用相同参数调用相同工具；如果没有新信息，请直接向用户说明问题。\n");
+        }
+
+        messages.add(objectMapper.createObjectNode()
+                .put("role", "user")
+                .put("content", hint.toString()));
+    }
+
+    private boolean isToolFailure(String result) {
+        if (result == null) return true;
+        String normalized = result.trim().toLowerCase();
+        return normalized.startsWith("error:")
+                || normalized.startsWith("failed")
+                || normalized.startsWith("timed out")
+                || normalized.startsWith("confirmation_required:")
+                || normalized.contains("exception")
+                || normalized.contains("not found")
+                || normalized.contains("no such file")
+                || normalized.contains("permission denied")
+                || normalized.contains("is a directory")
+                || normalized.contains("invalid")
+                || normalized.contains("traceback")
+                || normalized.startsWith("exit code:") && !normalized.startsWith("exit code: 0");
+    }
+
+    private String summarizeToolResult(String result) {
+        String normalized = result == null ? "" : result.replace('\r', '\n').trim();
+        if (normalized.isEmpty()) {
+            return "空结果";
+        }
+        int lineBreak = normalized.indexOf('\n');
+        String firstLine = lineBreak >= 0 ? normalized.substring(0, lineBreak) : normalized;
+        return firstLine.length() > 220 ? firstLine.substring(0, 220) + "..." : firstLine;
+    }
+
+    private String buildToolFailureSignature(String toolName, String arguments, String result) {
+        return (toolName == null ? "unknown" : toolName.trim()) + "|"
+                + (arguments == null ? "" : arguments.trim()) + "|"
+                + summarizeToolResult(result);
     }
 
     private String buildAgentMdSection() {
