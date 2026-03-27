@@ -120,10 +120,10 @@ public class BrowserTool {
             cmd.add("--tab");
             cmd.add(String.valueOf(tab));
         }
-        if (screenshot != null && !screenshot.isBlank()) {
-            cmd.add("--screenshot");
-            cmd.add(screenshot);
-        }
+        // Auto-screenshot: always capture so the model can "see" the page
+        cmd.add("--screenshot");
+        cmd.add((screenshot != null && !screenshot.isBlank()) ? screenshot
+                : Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_view.png").toString());
         return runProcess(cmd);
     }
 
@@ -174,10 +174,10 @@ public class BrowserTool {
             cmd.add("--tab");
             cmd.add(String.valueOf(tab));
         }
-        if (screenshot != null && !screenshot.isBlank()) {
-            cmd.add("--screenshot");
-            cmd.add(screenshot);
-        }
+        // Auto-screenshot: always capture so the model can "see" the result
+        cmd.add("--screenshot");
+        cmd.add((screenshot != null && !screenshot.isBlank()) ? screenshot
+                : Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_action.png").toString());
         return runProcess(cmd);
     }
 
