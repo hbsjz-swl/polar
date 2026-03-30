@@ -23,7 +23,7 @@
 ### 一键安装（macOS / Linux）
 
 ```bash
-git clone https://git.dlchm.cn/sunweilin/coding-agent.git && cd coding-agent && bash install.sh
+git clone https://github.com/hbsjz-swl/polar.git && cd polar && bash install.sh
 ```
 
 ### 方式三：手动安装
@@ -53,7 +53,7 @@ source ~/.zshrc
 ### Windows 一键安装
 
 ```cmd
-git clone https://git.dlchm.cn/sunweilin/coding-agent.git && cd coding-agent && install.bat
+git clone https://github.com/hbsjz-swl/polar.git && cd polar && install.bat
 ```
 
 安装脚本会自动复制 jar、创建启动器、配置 PATH。重新打开终端即可使用。

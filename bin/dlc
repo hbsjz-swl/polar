@@ -6,13 +6,14 @@ set -e
 
 DLC_HOME="${DLC_HOME:-$HOME/.dlc}"
 DLC_JAR="$DLC_HOME/dlc.jar"
-REPO_URL="https://git.dlchm.cn/sunweilin/coding-agent/raw/branch/main"
+GIT_REPO_URL="https://github.com/hbsjz-swl/polar.git"
+RAW_BASE_URL="https://raw.githubusercontent.com/hbsjz-swl/polar/main"
 
 # dlc upgrade - pull latest jar via git clone
 if [ "${1:-}" = "upgrade" ]; then
     echo "  Upgrading DLC..."
     TEMP_DIR=$(mktemp -d)
-    git clone --depth 1 "https://git.dlchm.cn/sunweilin/coding-agent.git" "$TEMP_DIR" -q 2>/dev/null
+    git clone --depth 1 "$GIT_REPO_URL" "$TEMP_DIR" -q 2>/dev/null
     if [ -f "$TEMP_DIR/dlc.jar" ]; then
         cp "$TEMP_DIR/dlc.jar" "$DLC_JAR"
         # 同时更新启动脚本自身
@@ -22,7 +23,7 @@ if [ "${1:-}" = "upgrade" ]; then
         fi
         echo "  Done. $(du -h "$DLC_JAR" | cut -f1)"
     else
-        echo "  Error: Failed to download. Try: git clone https://git.dlchm.cn/sunweilin/coding-agent.git"
+        echo "  Error: Failed to download. Try: git clone $GIT_REPO_URL"
     fi
     rm -rf "$TEMP_DIR"
     exit 0
@@ -30,7 +31,7 @@ fi
 
 if [ ! -f "$DLC_JAR" ]; then
     echo "Error: dlc.jar not found at $DLC_JAR"
-    echo "Run: curl -fsSL ${REPO_URL}/install.sh | bash"
+    echo "Run: curl -fsSL ${RAW_BASE_URL}/install.sh | bash"
     exit 1
 fi
 

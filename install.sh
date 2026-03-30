@@ -3,7 +3,7 @@
 # 蒂爱嘉(北京)有限公司
 #
 # Usage:
-#   git clone https://git.dlchm.cn/sunweilin/coding-agent.git && cd coding-agent && bash install.sh
+#   git clone https://github.com/hbsjz-swl/polar.git && cd polar && bash install.sh
 
 set -e
 
@@ -24,7 +24,7 @@ if [ -f "dlc.jar" ]; then
 else
     echo "  Cloning repository to download dlc.jar..."
     TEMP_DIR=$(mktemp -d)
-    git clone --depth 1 "https://git.dlchm.cn/sunweilin/coding-agent.git" "$TEMP_DIR" -q
+    git clone --depth 1 "https://github.com/hbsjz-swl/polar.git" "$TEMP_DIR" -q
     if [ -f "$TEMP_DIR/dlc.jar" ]; then
         cp "$TEMP_DIR/dlc.jar" "$DLC_HOME/dlc.jar"
     else
@@ -46,7 +46,7 @@ DLC_JAR="$DLC_HOME/dlc.jar"
 if [ "${1:-}" = "upgrade" ]; then
     echo "  Upgrading DLC..."
     TEMP_DIR=$(mktemp -d)
-    git clone --depth 1 "https://git.dlchm.cn/sunweilin/coding-agent.git" "$TEMP_DIR" -q 2>/dev/null
+    git clone --depth 1 "https://github.com/hbsjz-swl/polar.git" "$TEMP_DIR" -q 2>/dev/null
     if [ -f "$TEMP_DIR/dlc.jar" ]; then
         cp "$TEMP_DIR/dlc.jar" "$DLC_JAR"
         echo "  Done. $(du -h "$DLC_JAR" | cut -f1)"
@@ -59,7 +59,7 @@ fi
 
 if [ ! -f "$DLC_JAR" ]; then
     echo "Error: dlc.jar not found at $DLC_JAR"
-    echo "Run: git clone https://git.dlchm.cn/sunweilin/coding-agent.git && cd coding-agent && bash install.sh"
+    echo "Run: git clone https://github.com/hbsjz-swl/polar.git && cd polar && bash install.sh"
     exit 1
 fi
 
