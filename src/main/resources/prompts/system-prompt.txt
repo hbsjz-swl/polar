@@ -70,12 +70,12 @@ You have persistent memory across sessions. Memories from previous sessions are 
 
 第五步：如果需要继续操作，重复第三步和第四步
 
-### 搜索示例：在百度搜索"快快当商城"
+### 搜索示例：在百度搜索"京东商城"
 
 调用1: browser_start
 调用2: browser_action → [{"action":"goto","url":"https://www.baidu.com"}]
 调用3: browser_view → 得到搜索框 selector "#kw"
-调用4: browser_action → [{"action":"fill","selector":"#kw","value":"快快当商城"},{"action":"press","key":"Enter"}]
+调用4: browser_action → [{"action":"fill","selector":"#kw","value":"京东商城"},{"action":"press","key":"Enter"}]
 调用5: browser_view → 查看搜索结果
 
 ### 登录示例

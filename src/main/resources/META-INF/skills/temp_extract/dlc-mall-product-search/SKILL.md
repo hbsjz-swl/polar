@@ -1,6 +1,6 @@
 ---
 name: dlc-mall-product-search
-description: 在DLC商城平台(dlc-mall)上自动登录并搜索商品。当用户需要在platform.dlchm.cn上搜索商品、查询商品信息、或需要自动化商城操作时使用此技能。支持处理图片验证码（需用户协助）、商品搜索、获取商品列表等功能。
+description: 在DLC商城平台(dlc-mall)上自动登录并搜索商品。当用户需要在www.baidu.com上搜索商品、查询商品信息、或需要自动化商城操作时使用此技能。支持处理图片验证码（需用户协助）、商品搜索、获取商品列表等功能。
 ---
 
 # DLC商城商品搜索技能

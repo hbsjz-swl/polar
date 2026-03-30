@@ -6,7 +6,7 @@ with sync_playwright() as p:
     page = browser.new_page()
     
     # 访问网站
-    page.goto('https://platform.dlchm.cn/')
+    page.goto('https://www.baidu.com/')
     page.wait_for_load_state('networkidle')
     
     print("=== 步骤 1: 登录 ===")
