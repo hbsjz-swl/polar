@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Polar - Local AI Coding Agent
+
+set -e
+
+DLC_HOME="${DLC_HOME:-$HOME/.dlc}"
+DLC_JAR="$DLC_HOME/dlc.jar"
+GIT_REPO_URL="https://github.com/hbsjz-swl/dlc-cli.git"
+RAW_BASE_URL="https://raw.githubusercontent.com/hbsjz-swl/dlc-cli/main"
+
+if [ "${1:-}" = "upgrade" ]; then
+    echo "  Upgrading Polar..."
+    TEMP_DIR=$(mktemp -d)
+    if git clone --depth 1 "$GIT_REPO_URL" "$TEMP_DIR" -q 2>/dev/null; then
+        :
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$TEMP_DIR/dlc.jar" "$RAW_BASE_URL/dlc.jar" 2>/dev/null || true
+        curl -fsSL -o "$TEMP_DIR/bin/polar" "$RAW_BASE_URL/bin/polar" 2>/dev/null || true
+        curl -fsSL -o "$TEMP_DIR/bin/dlc" "$RAW_BASE_URL/bin/dlc" 2>/dev/null || true
+        chmod +x "$TEMP_DIR/bin/polar" "$TEMP_DIR/bin/dlc" 2>/dev/null || true
+    fi
+    if [ -f "$TEMP_DIR/dlc.jar" ]; then
+        cp "$TEMP_DIR/dlc.jar" "$DLC_JAR"
+        if [ -f "$TEMP_DIR/bin/polar" ]; then
+            cp "$TEMP_DIR/bin/polar" "$DLC_HOME/bin/polar"
+            chmod +x "$DLC_HOME/bin/polar"
+        fi
+        if [ -f "$TEMP_DIR/bin/dlc" ]; then
+            cp "$TEMP_DIR/bin/dlc" "$DLC_HOME/bin/dlc"
+            chmod +x "$DLC_HOME/bin/dlc"
+        fi
+        echo "  Done. $(du -h "$DLC_JAR" | cut -f1)"
+    else
+        echo "  Error: Failed to download from $GIT_REPO_URL"
+        echo "  Check that the repository is reachable and contains dlc.jar."
+    fi
+    rm -rf "$TEMP_DIR"
+    exit 0
+fi
+
+if [ ! -f "$DLC_JAR" ]; then
+    echo "Error: dlc.jar not found at $DLC_JAR"
+    echo "Run: curl -fsSL ${RAW_BASE_URL}/install.sh | bash"
+    exit 1
+fi
+
+export DLC_WORKSPACE="${DLC_WORKSPACE:-$(pwd)}"
+exec java -jar "$DLC_JAR" "$@"
