@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Polar Installer
-# 蒂爱嘉(北京)有限公司
 #
 # Usage:
 #   git clone https://github.com/hbsjz-swl/dlc-cli.git && cd dlc-cli && bash install.sh

@@ -15,7 +15,7 @@
     <artifactId>dlc</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <name>DLC Coding Agent</name>
-    <description>Local AI Coding Agent CLI - 蒂爱嘉(北京)有限公司</description>
+    <description>Local AI Coding Agent CLI - Viliam</description>
 
     <properties>
         <java.version>17</java.version>
@@ -292,7 +292,7 @@
                             <type>DMG</type>
                             <name>dlc</name>
                             <appVersion>1.0.0</appVersion>
-                            <vendor>蒂爱嘉(北京)有限公司</vendor>
+                            <vendor>Viliam</vendor>
                             <description>DLC - Local AI Coding Agent</description>
                             <input>target</input>
                             <mainJar>dlc-${project.version}.jar</mainJar>
@@ -329,7 +329,7 @@
                             <type>EXE</type>
                             <name>dlc</name>
                             <appVersion>1.0.0</appVersion>
-                            <vendor>蒂爱嘉(北京)有限公司</vendor>
+                            <vendor>Viliam</vendor>
                             <description>DLC - Local AI Coding Agent</description>
                             <input>target</input>
                             <mainJar>dlc-${project.version}.jar</mainJar>

@@ -1,7 +1,6 @@
 @echo off
 chcp 65001 >nul 2>&1
 REM Polar Installer for Windows
-REM 蒂爱嘉(北京)有限公司
 REM
 REM Usage: git clone https://github.com/hbsjz-swl/dlc-cli.git && cd dlc-cli && install.bat
 
