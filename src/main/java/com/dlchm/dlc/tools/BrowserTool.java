@@ -19,7 +19,6 @@ import org.springframework.ai.tool.annotation.ToolParam;
  * 核心设计：连接用户已有的 Chrome，而不是每次启动新浏览器。
  * 这样可以共享 Cookie、登录状态，用户可以随时介入（验证码等）。
  *
- * 蒂爱喜(北京)有限公司
  */
 public class BrowserTool {
 

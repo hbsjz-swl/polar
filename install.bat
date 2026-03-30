@@ -1,25 +1,25 @@
 @echo off
 chcp 65001 >nul 2>&1
-REM DLC Installer for Windows
+REM Polar Installer for Windows
 REM 蒂爱嘉(北京)有限公司
 REM
 REM Usage: git clone https://github.com/hbsjz-swl/dlc-cli.git && cd dlc-cli && install.bat
 
 setlocal
 
-set DLC_HOME=%USERPROFILE%\.dlc
+set APP_HOME=%USERPROFILE%\.dlc
 
 echo.
-echo   Installing DLC - Local AI Coding Agent ...
-echo   Install dir: %DLC_HOME%
+echo   Installing Polar - Local AI Coding Agent ...
+echo   Install dir: %APP_HOME%
 echo.
 
-if not exist "%DLC_HOME%\bin" mkdir "%DLC_HOME%\bin"
+if not exist "%APP_HOME%\bin" mkdir "%APP_HOME%\bin"
 
 REM Copy jar and launcher from local clone
 if exist "dlc.jar" (
     echo   Copying files from local directory...
-    copy /Y "dlc.jar" "%DLC_HOME%\dlc.jar" >nul
+    copy /Y "dlc.jar" "%APP_HOME%\dlc.jar" >nul
 ) else (
     echo   Error: dlc.jar not found in current directory.
     echo   Please run this from the cloned repository.
@@ -27,33 +27,34 @@ if exist "dlc.jar" (
     exit /b 1
 )
 
-REM Copy launcher script from bin/
-if exist "bin\dlc.cmd" (
-    copy /Y "bin\dlc.cmd" "%DLC_HOME%\bin\dlc.cmd" >nul
+REM Copy launcher scripts from bin/
+if exist "bin\polar.cmd" (
+    copy /Y "bin\polar.cmd" "%APP_HOME%\bin\polar.cmd" >nul
 ) else (
-    echo   Error: bin\dlc.cmd not found.
+    echo   Error: bin\polar.cmd not found.
     pause
     exit /b 1
 )
+if exist "bin\dlc.cmd" copy /Y "bin\dlc.cmd" "%APP_HOME%\bin\dlc.cmd" >nul
 
-echo   Created launcher: %DLC_HOME%\bin\dlc.cmd
+echo   Created launcher: %APP_HOME%\bin\polar.cmd
 
 REM Add to user PATH
 echo %PATH% | findstr /i ".dlc\bin" >nul 2>&1
 if errorlevel 1 (
     echo   Adding to PATH...
-    powershell -Command "[Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'User') + ';%DLC_HOME%\bin', 'User')"
-    echo   Added %DLC_HOME%\bin to user PATH
+    powershell -Command "[Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'User') + ';%APP_HOME%\bin', 'User')"
+    echo   Added %APP_HOME%\bin to user PATH
 )
 
 echo.
-echo   DLC installed successfully!
+echo   Polar installed successfully!
 echo.
 echo   Close and reopen your terminal, then run:
 echo     cd \your\project
-echo     dlc
+echo     polar
 echo.
 echo   Update to latest version:
-echo     dlc upgrade
+echo     polar upgrade
 echo.
 pause

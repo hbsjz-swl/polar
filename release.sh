@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DLC Release Script - 打包并推送到 Git 仓库
+# Polar Release Script - 打包并推送到 Git 仓库
 # Usage: bash release.sh
 
 set -e
@@ -37,6 +37,8 @@ cp "$SCRIPT_DIR/target/dlc-"*"-SNAPSHOT.jar" "$RELEASE_DIR/dlc.jar"
 cp "$SCRIPT_DIR/install.sh" "$RELEASE_DIR/"
 cp "$SCRIPT_DIR/install.bat" "$RELEASE_DIR/"
 mkdir -p "$RELEASE_DIR/bin"
+cp "$SCRIPT_DIR/bin/polar" "$RELEASE_DIR/bin/"
+cp "$SCRIPT_DIR/bin/polar.cmd" "$RELEASE_DIR/bin/"
 cp "$SCRIPT_DIR/bin/dlc" "$RELEASE_DIR/bin/"
 cp "$SCRIPT_DIR/bin/dlc.cmd" "$RELEASE_DIR/bin/"
 
@@ -50,7 +52,7 @@ git add -A
 if git diff --cached --quiet; then
     echo "  No changes to push."
 else
-    git commit -m "release: update DLC $(date '+%Y-%m-%d %H:%M')"
+    git commit -m "release: update Polar $(date '+%Y-%m-%d %H:%M')"
     git push -u origin main
     echo ""
     echo "  Released successfully!"

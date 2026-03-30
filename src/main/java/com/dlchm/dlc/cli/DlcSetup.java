@@ -73,7 +73,7 @@ public class DlcSetup {
         try {
             Files.createDirectories(CONFIG_DIR);
             try (Writer writer = Files.newBufferedWriter(CONFIG_FILE)) {
-                config.store(writer, "DLC Configuration - 蒂爱喜(北京)有限公司");
+                config.store(writer, "Polar Configuration - Polar");
             }
             // Restrict file permissions (owner only)
             CONFIG_FILE.toFile().setReadable(false, false);
@@ -91,7 +91,7 @@ public class DlcSetup {
 
         System.out.println();
         System.out.println(ANSI_CYAN + "  ╔══════════════════════════════════════╗" + ANSI_RESET);
-        System.out.println(ANSI_CYAN + "  ║        DLC - 初始化设置                ║" + ANSI_RESET);
+        System.out.println(ANSI_CYAN + "  ║        POLAR - 初始化设置                ║" + ANSI_RESET);
         System.out.println(ANSI_CYAN + "  ╚══════════════════════════════════════╝" + ANSI_RESET);
         System.out.println();
         System.out.println(ANSI_DIM + "  Configure your LLM API connection." + ANSI_RESET);

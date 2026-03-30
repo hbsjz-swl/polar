@@ -11,7 +11,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * DLC - Local AI Coding Agent
- * 蒂爱喜(北京)科技有限公司
  *
  * 启动后同时运行：
  * - CLI 终端交互（独立线程）

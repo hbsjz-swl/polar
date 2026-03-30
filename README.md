@@ -1,8 +1,6 @@
-# DLC - Local AI Cowork Agent
+# Polar - Local AI Cowork Agent
 
 本地 AI 办公助手，在终端中通过自然语言操作代码。所有文件操作在本地执行，仅 LLM 推理通过 API 调用。
-
-**蒂爱喜(北京)科技有限公司**
 
 ---
 
@@ -29,18 +27,18 @@ git clone https://github.com/hbsjz-swl/dlc-cli.git && cd dlc-cli && bash install
 ### 方式三：手动安装
 
 1. 下载 `dlc.jar` 放到 `~/.dlc/` 目录
-2. 创建启动脚本 `~/.dlc/bin/dlc`：
+2. 创建启动脚本 `~/.dlc/bin/polar`：
 
 ```bash
 mkdir -p ~/.dlc/bin
 cp dlc.jar ~/.dlc/dlc.jar
-cat > ~/.dlc/bin/dlc << 'EOF'
+cat > ~/.dlc/bin/polar << 'EOF'
 #!/usr/bin/env bash
 DLC_HOME="${DLC_HOME:-$HOME/.dlc}"
 export DLC_WORKSPACE="${DLC_WORKSPACE:-$(pwd)}"
 exec java -jar "$DLC_HOME/dlc.jar" "$@"
 EOF
-chmod +x ~/.dlc/bin/dlc
+chmod +x ~/.dlc/bin/polar
 ```
 
 3. 将 `~/.dlc/bin` 加入 PATH：
@@ -91,7 +89,7 @@ playwright install chromium(如果失败使用npx安装: npx playwright install 
 
 ```bash
 cd /your/project
-dlc
+polar
 ```
 
 ### 首次启动
@@ -140,7 +138,7 @@ dlc
 已安装的用户只需执行：
 
 ```bash
-dlc upgrade
+polar upgrade
 ```
 
 会自动下载最新版版本并替换，无需重新安装。
@@ -173,7 +171,7 @@ sed -i '/\.dlc\/bin/d' ~/.bashrc && source ~/.bashrc
 
 验证卸载成功：
 ```bash
-which dlc    # 应该无输出
+which polar    # 应该无输出
 ls ~/.dlc    # 应该提示 No such file or directory
 ```
 
@@ -197,7 +195,7 @@ $path = [Environment]::GetEnvironmentVariable('PATH', 'User') -replace '[;]?[^;]
 **第 3 步：验证**（重新打开终端后执行）
 
 ```powershell
-dlc          # 应该提示"不是内部或外部命令"
+polar          # 应该提示"不是内部或外部命令"
 Test-Path "$env:USERPROFILE\.dlc"   # 应该返回 False
 ```
 
@@ -208,8 +206,8 @@ Test-Path "$env:USERPROFILE\.dlc"   # 应该返回 False
 ```
 ~/.dlc/
 ├── dlc.jar             
-├── bin/dlc              
-├── bin/dlc.cmd          
+├── bin/polar
+├── bin/polar.cmd
 ├── config.properties  
 ├── memory.md           
 └── skills/             
@@ -227,4 +225,4 @@ Test-Path "$env:USERPROFILE\.dlc"   # 应该返回 False
 
 ## License
 
-Copyright (c) 2026 蒂爱喜(北京)科技有限公司. All rights reserved.
+Copyright (c) 2026 Viliam. All rights reserved.

@@ -21,22 +21,16 @@ import org.jline.terminal.TerminalBuilder;
 import org.springframework.stereotype.Component;
 
 /**
- * DLC 终端交互界面。
- * 蒂爱喜(北京)有限公司
+ * 终端交互界面。
  */
 @Component
 public class DlcCli {
 
     private static final String BANNER = """
 
-              ██████╗ ██╗      ██████╗
-              ██╔══██╗██║     ██╔════╝
-              ██║  ██║██║     ██║
-              ██║  ██║██║     ██║
-              ██████╔╝███████╗╚██████╗
-              ╚═════╝ ╚══════╝ ╚═════╝
+              POLAR
               Local AI CorWork Agent
-              蒂爱喜(北京)科技有限公司-石家庄AI项目组研发
+              Viliam
             """;
 
     private static final String ANSI_RESET = "\u001B[0m";
@@ -149,7 +143,7 @@ public class DlcCli {
 
     private void processMessage(Session session, String userMessage) {
         System.out.println();
-        System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
+        System.out.print(ANSI_CYAN + "polar> " + ANSI_RESET);
 
         CountDownLatch latch = new CountDownLatch(1);
         StringBuilder fullResponse = new StringBuilder();
@@ -176,7 +170,7 @@ public class DlcCli {
                                 thinkCount[0]++;
                                 long elapsed = (System.currentTimeMillis() - thinkStart[0]) / 1000;
                                 String spin = spinner[thinkCount[0] % spinner.length];
-                                System.out.print("\r" + ANSI_CYAN + "dlc> "
+                                System.out.print("\r" + ANSI_CYAN + "polar> "
                                         + ANSI_DIM + spin + " thinking... (" + elapsed + "s)"
                                         + ANSI_RESET + "\033[K");
                                 System.out.flush();
@@ -184,7 +178,7 @@ public class DlcCli {
                                 if (inReasoning[0]) {
                                     inReasoning[0] = false;
                                     System.out.print("\r\033[K");
-                                    System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
+                                    System.out.print(ANSI_CYAN + "polar> " + ANSI_RESET);
                                 }
                                 System.out.print(event.data());
                                 fullResponse.append(event.data());
@@ -215,7 +209,7 @@ public class DlcCli {
                         () -> {
                             if (inReasoning[0]) {
                                 System.out.print("\r\033[K");
-                                System.out.print(ANSI_CYAN + "dlc> " + ANSI_RESET);
+                                System.out.print(ANSI_CYAN + "polar> " + ANSI_RESET);
                             }
                             System.out.println();
                             if (usageInfo[0] != null) {
