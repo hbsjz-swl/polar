@@ -6,8 +6,8 @@ set -e
 
 DLC_HOME="${DLC_HOME:-$HOME/.dlc}"
 DLC_JAR="$DLC_HOME/dlc.jar"
-GIT_REPO_URL="https://github.com/hbsjz-swl/polar.git"
-RAW_BASE_URL="https://raw.githubusercontent.com/hbsjz-swl/polar/main"
+GIT_REPO_URL="https://github.com/hbsjz-swl/dlc-cli.git"
+RAW_BASE_URL="https://raw.githubusercontent.com/hbsjz-swl/dlc-cli/main"
 
 # dlc upgrade - pull latest jar via git clone
 if [ "${1:-}" = "upgrade" ]; then

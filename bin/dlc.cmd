@@ -19,8 +19,8 @@ exit /b 0
 
 :upgrade
 echo   Upgrading DLC...
-set GIT_REPO_URL=https://github.com/hbsjz-swl/polar.git
-set RAW_BASE_URL=https://raw.githubusercontent.com/hbsjz-swl/polar/main
+set GIT_REPO_URL=https://github.com/hbsjz-swl/dlc-cli.git
+set RAW_BASE_URL=https://raw.githubusercontent.com/hbsjz-swl/dlc-cli/main
 set TEMP_DIR=%TEMP%\dlc-upgrade-%RANDOM%
 
 REM 方式1: git clone

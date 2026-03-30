@@ -4,8 +4,8 @@
 
 set -e
 
-REPO_URL="https://github.com/hbsjz-swl/polar.git"
-RELEASE_DIR="/tmp/polar"
+REPO_URL="https://github.com/hbsjz-swl/dlc-cli.git"
+RELEASE_DIR="/tmp/dlc-cli"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo ""

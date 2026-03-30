@@ -3,7 +3,7 @@ chcp 65001 >nul 2>&1
 REM DLC Installer for Windows
 REM 蒂爱嘉(北京)有限公司
 REM
-REM Usage: git clone https://github.com/hbsjz-swl/polar.git && cd polar && install.bat
+REM Usage: git clone https://github.com/hbsjz-swl/dlc-cli.git && cd dlc-cli && install.bat
 
 setlocal
 
