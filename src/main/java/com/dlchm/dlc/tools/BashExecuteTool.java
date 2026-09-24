@@ -48,15 +48,25 @@ public class BashExecuteTool {
             Process process = pb.start();
 
             StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) output.append(line).append('\n');
-            }
-
+            Thread readerThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                    char[] chunk = new char[4_096];
+                    int count;
+                    while ((count = reader.read(chunk)) != -1) {
+                        synchronized (output) {
+                            output.append(chunk, 0, count);
+                            if (output.length() > 60_000) output.delete(20_000, output.length() - 20_000);
+                        }
+                    }
+                } catch (Exception ignored) { }
+            }, "dlc-bash-output");
+            readerThread.setDaemon(true);
+            readerThread.start();
             if (!process.waitFor(timeout, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
                 return truncator.truncate("Timed out after " + timeout + "s.\n" + output);
             }
+            readerThread.join(1_000);
             return truncator.truncate("Exit code: " + process.exitValue() + "\n" + output);
         } catch (Exception e) {
             return "Error: " + e.getMessage();

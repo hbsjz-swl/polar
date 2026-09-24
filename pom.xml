@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.11</version>
+        <version>4.1.0</version>
         <relativePath/>
     </parent>
 
@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>17</java.version>
-        <spring-ai.version>1.1.3-SNAPSHOT</spring-ai.version>
+        <spring-ai.version>2.1.0-SNAPSHOT</spring-ai.version>
         <tamboui.version>0.2.0-SNAPSHOT</tamboui.version>
     </properties>
 
@@ -55,12 +55,21 @@
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
-        <!-- Spring AI: only core tool framework (@Tool, ToolCallback, MethodToolCallbackProvider) -->
-        <!-- NOT using spring-ai-starter-model-openai to avoid OpenAiChatModel auto-config -->
-        <!-- which forces streaming internally and is incompatible with DashScope tool calls -->
+        <!-- Spring AI 2.x model and chat APIs. The loop drives ChatModel tool calls explicitly. -->
         <dependency>
             <groupId>org.springframework.ai</groupId>
-            <artifactId>spring-ai-model</artifactId>
+            <artifactId>spring-ai-client-chat</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-openai</artifactId>
+        </dependency>
+
+        <!-- Spring AI Community coding tools (workspace-constrained file/search tools). -->
+        <dependency>
+            <groupId>org.springaicommunity</groupId>
+            <artifactId>spring-ai-agent-utils</artifactId>
+            <version>0.12.0</version>
         </dependency>
 
         <!-- TamboUI: Terminal UI -->

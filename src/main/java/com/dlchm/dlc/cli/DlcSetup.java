@@ -29,6 +29,16 @@ public class DlcSetup {
      * 将配置设置为系统属性，供 Spring Boot 读取。
      */
     public static void ensureConfigured() {
+        String envUrl = System.getenv("SPRING_AI_OPENAI_BASE_URL");
+        String envKey = System.getenv("SPRING_AI_OPENAI_API_KEY");
+        String envModel = System.getenv("SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL");
+        if (envUrl != null && !envUrl.isBlank() && envKey != null && !envKey.isBlank()
+                && envModel != null && !envModel.isBlank()) {
+            System.setProperty("spring.ai.openai.base-url", envUrl);
+            System.setProperty("spring.ai.openai.api-key", envKey);
+            System.setProperty("spring.ai.openai.chat.options.model", envModel);
+            return;
+        }
         Properties config = loadConfig();
 
         if (config.isEmpty()

@@ -2,6 +2,12 @@ package com.dlchm.dlc.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import java.util.List;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.tool.ToolCallback;
 
 /**
  * 基于字符数的 token 估算工具。
@@ -32,6 +38,37 @@ public final class TokenEstimator {
         return (int) Math.ceil(cjkChars / CJK_CHARS_PER_TOKEN + otherChars / LATIN_CHARS_PER_TOKEN);
     }
 
+    public static int estimateMessages(List<Message> messages) {
+        int total = 0;
+        for (Message message : messages) {
+            total += 4 + estimateTokens(message.getText());
+            if (message instanceof UserMessage user) {
+                total += user.getMedia().size() * 1_600;
+            } else if (message instanceof AssistantMessage assistant) {
+                for (var call : assistant.getToolCalls()) {
+                    total += estimateTokens(call.name()) + estimateTokens(call.arguments());
+                }
+                for (var thought : assistant.getReasoning()) {
+                    total += estimateTokens(thought.summary());
+                    if (thought.payload() != null) total += thought.payload().toString().length() / 4;
+                }
+            } else if (message instanceof ToolResponseMessage tools) {
+                for (var result : tools.getResponses()) total += estimateTokens(result.responseData());
+            }
+        }
+        return total;
+    }
+
+    public static int estimateToolDefs(ToolCallback[] callbacks) {
+        int total = 0;
+        for (ToolCallback callback : callbacks) {
+            var def = callback.getToolDefinition();
+            total += estimateTokens(def.name()) + estimateTokens(def.description())
+                    + estimateTokens(def.inputSchema());
+        }
+        return total;
+    }
+
     /**
      * 估算 messages 数组的总 token 数。
      * 每条消息额外计 4 token（role、分隔符等开销）。
@@ -41,8 +78,16 @@ public final class TokenEstimator {
         int total = 0;
         for (JsonNode msg : messages) {
             total += 4; // message overhead
-            String content = msg.path("content").asText("");
-            total += estimateTokens(content);
+            JsonNode content = msg.path("content");
+            if (content.isTextual()) {
+                total += estimateTokens(content.asText(""));
+            } else if (content.isArray()) {
+                for (JsonNode part : content) {
+                    total += estimateTokens(part.path("text").asText(""));
+                    if ("image_url".equals(part.path("type").asText(""))) total += 1_600;
+                }
+            }
+            if (msg.has("dlc_image_path")) total += 1_600;
             // tool_calls arguments
             JsonNode toolCalls = msg.path("tool_calls");
             if (toolCalls.isArray()) {

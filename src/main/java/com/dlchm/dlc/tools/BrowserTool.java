@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import jakarta.annotation.PreDestroy;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
@@ -30,6 +31,8 @@ public class BrowserTool {
     private static final String PYTHON_CMD = IS_WINDOWS ? "python" : "python3";
 
     private final ToolOutputTruncator truncator;
+    private volatile Process ownedChrome;
+    private final List<ProcessHandle> ownedHandles = new ArrayList<>();
 
     public BrowserTool(ToolOutputTruncator truncator) {
         this.truncator = truncator;
@@ -45,6 +48,10 @@ public class BrowserTool {
         if (tabs != null) {
             return "Chrome is already running.\n" + tabs;
         }
+        if (BrowserCacheCleaner.inUse()) {
+            return "Error: DLC's Chrome profile is already in use without a reachable CDP port.";
+        }
+        BrowserCacheCleaner.prune();
 
         // Detect OS and Chrome path
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -68,9 +75,11 @@ public class BrowserTool {
             cmd.add(findChromeLinux());
         }
 
-        String profileDir = Path.of(System.getProperty("java.io.tmpdir"), "dlc-chrome-profile").toString();
+        String profileDir = BrowserCacheCleaner.PROFILE.toString();
         cmd.add("--remote-debugging-port=" + CDP_PORT);
         cmd.add("--user-data-dir=" + profileDir);
+        cmd.add("--disk-cache-size=67108864");
+        cmd.add("--media-cache-size=33554432");
         cmd.add("--no-first-run");
         cmd.add("--no-default-browser-check");
 
@@ -78,13 +87,17 @@ public class BrowserTool {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-            pb.start();
+            ownedChrome = pb.start();
 
             // Wait for Chrome to start
             for (int i = 0; i < 10; i++) {
                 Thread.sleep(1000);
                 tabs = listTabsViaCdp();
                 if (tabs != null) {
+                    synchronized (ownedHandles) {
+                        ownedHandles.add(ownedChrome.toHandle());
+                        ownedChrome.toHandle().descendants().forEach(ownedHandles::add);
+                    }
                     return "Chrome started successfully.\n" + tabs;
                 }
             }
@@ -156,7 +169,6 @@ public class BrowserTool {
         try {
             actionsFile = Files.createTempFile("dlc-actions-", ".json");
             Files.writeString(actionsFile, actions, StandardCharsets.UTF_8);
-            actionsFile.toFile().deleteOnExit();
         } catch (Exception e) {
             return "Error: Failed to write actions file: " + e.getMessage();
         }
@@ -177,7 +189,11 @@ public class BrowserTool {
         cmd.add("--screenshot");
         cmd.add((screenshot != null && !screenshot.isBlank()) ? screenshot
                 : Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_action.png").toString());
-        return runProcess(cmd);
+        try {
+            return runProcess(cmd);
+        } finally {
+            try { Files.deleteIfExists(actionsFile); } catch (Exception ignored) { }
+        }
     }
 
     // ==================== Helpers ====================
@@ -292,17 +308,25 @@ public class BrowserTool {
             Process process = pb.start();
 
             StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    output.append(line).append('\n');
-                }
-            }
-
+            Thread readerThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                    char[] chunk = new char[4_096];
+                    int count;
+                    while ((count = reader.read(chunk)) != -1) {
+                        synchronized (output) {
+                            output.append(chunk, 0, count);
+                            if (output.length() > 60_000) output.delete(20_000, output.length() - 20_000);
+                        }
+                    }
+                } catch (Exception ignored) { }
+            }, "dlc-browser-output");
+            readerThread.setDaemon(true);
+            readerThread.start();
             if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly();
                 return "Error: Browser operation timed out after " + TIMEOUT_SECONDS + "s.";
             }
+            readerThread.join(1_000);
 
             String result = output.toString();
 
@@ -321,5 +345,23 @@ public class BrowserTool {
         } catch (Exception e) {
             return "Error: " + e.getMessage();
         }
+    }
+
+    @PreDestroy
+    public void closeOwnedBrowser() {
+        synchronized (ownedHandles) {
+            for (int i = ownedHandles.size() - 1; i >= 0; i--) {
+                ProcessHandle handle = ownedHandles.get(i);
+                if (handle.isAlive()) handle.destroy();
+            }
+            ownedHandles.clear();
+        }
+        if (ownedChrome != null && ownedChrome.isAlive()) ownedChrome.destroy();
+        try {
+            if (ownedChrome != null) ownedChrome.waitFor(3, TimeUnit.SECONDS);
+            Files.deleteIfExists(Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_view.png"));
+            Files.deleteIfExists(Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_action.png"));
+        } catch (Exception ignored) { }
+        BrowserCacheCleaner.prune();
     }
 }

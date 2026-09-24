@@ -16,7 +16,8 @@ import org.springframework.stereotype.Component;
 public class SessionManager {
 
     private static final Logger log = LoggerFactory.getLogger(SessionManager.class);
-    private static final Duration IDLE_TIMEOUT = Duration.ofHours(1);
+    private static final Duration IDLE_TIMEOUT = Duration.ofMinutes(30);
+    private static final int MAX_SESSIONS = 64;
     private static final String CLI_SESSION_ID = "cli";
 
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
@@ -25,7 +26,10 @@ public class SessionManager {
      * 获取或创建会话。
      */
     public Session getOrCreate(String id, String channelType, String userId) {
-        return sessions.computeIfAbsent(id, k -> new Session(id, channelType, userId));
+        Session session = sessions.computeIfAbsent(id, k -> new Session(id, channelType, userId));
+        session.touch();
+        enforceCapacity();
+        return session;
     }
 
     /**
@@ -34,6 +38,7 @@ public class SessionManager {
     public Session create(String channelType, String userId) {
         Session session = new Session(channelType, userId);
         sessions.put(session.getId(), session);
+        enforceCapacity();
         return session;
     }
 
@@ -41,7 +46,9 @@ public class SessionManager {
      * 获取已有会话。
      */
     public Session get(String id) {
-        return sessions.get(id);
+        Session session = sessions.get(id);
+        if (session != null) session.touch();
+        return session;
     }
 
     /**
@@ -79,6 +86,16 @@ public class SessionManager {
      */
     public int getActiveSessionCount() {
         return sessions.size();
+    }
+
+    private void enforceCapacity() {
+        while (sessions.size() > MAX_SESSIONS) {
+            sessions.entrySet().stream()
+                    .filter(e -> !CLI_SESSION_ID.equals(e.getKey()))
+                    .min((a, b) -> a.getValue().getLastActiveAt().compareTo(b.getValue().getLastActiveAt()))
+                    .ifPresentOrElse(e -> sessions.remove(e.getKey(), e.getValue()), () -> { return; });
+            if (sessions.size() <= 1) break;
+        }
     }
 
     /**

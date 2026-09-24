@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,6 +19,9 @@ import org.springframework.ai.tool.annotation.ToolParam;
  * 启动时自动加载到系统提示词，LLM 可通过 memory_save 主动记忆。
  */
 public class MemoryTool {
+
+    private static final long MAX_MEMORY_FILE_BYTES = 1_000_000;
+    private static final int MAX_READ_CHARS = 16_000;
 
     private final Path globalMemoryPath;
     private final Path projectMemoryPath;
@@ -54,15 +58,24 @@ public class MemoryTool {
                 Files.writeString(path, header, StandardCharsets.UTF_8);
             }
 
-            // Check for duplicate (exact same content already exists)
-            String existing = Files.readString(path, StandardCharsets.UTF_8);
-            if (existing.contains(content.trim())) {
+            if (Files.size(path) >= MAX_MEMORY_FILE_BYTES) {
+                return "Memory file has reached its 1 MB limit. Review or delete old entries first.";
+            }
+            // Stream the duplicate check; avoid copying the whole memory file.
+            boolean exists;
+            try (var lines = Files.lines(path, StandardCharsets.UTF_8)) {
+                exists = lines.anyMatch(line -> line.contains(content.trim()));
+            }
+            if (exists) {
                 return "Memory already exists, skipped.";
             }
 
             // Append with date tag
             String entry = "\n- [" + LocalDate.now() + "] " + content.trim() + "\n";
-            Files.writeString(path, existing + entry, StandardCharsets.UTF_8);
+            if (Files.size(path) + entry.getBytes(StandardCharsets.UTF_8).length > MAX_MEMORY_FILE_BYTES) {
+                return "Memory file has reached its 1 MB limit. Review or delete old entries first.";
+            }
+            Files.writeString(path, entry, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
 
             return "Saved to " + (isGlobal ? "global" : "project") + " memory.";
         } catch (IOException e) {
@@ -190,7 +203,16 @@ public class MemoryTool {
             return "";
         }
         try {
-            String content = Files.readString(path, StandardCharsets.UTF_8).trim();
+            String content;
+            try (var reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+                char[] chars = new char[MAX_READ_CHARS + 1];
+                int count = reader.read(chars);
+                if (count < 0) return "";
+                content = new String(chars, 0, Math.min(count, MAX_READ_CHARS)).trim();
+                if (count > MAX_READ_CHARS || Files.size(path) > MAX_READ_CHARS) {
+                    content += "\n[记忆内容已截断；请整理旧条目]";
+                }
+            }
             // Strip the header line if it starts with "# DLC"
             if (content.startsWith("# DLC")) {
                 int nl = content.indexOf('\n');
