@@ -29,7 +29,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.MessageAggregator;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.content.Media;
-import org.springframework.ai.openai.responses.OpenAiResponsesChatModel;
+import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.core.io.ByteArrayResource;
@@ -37,9 +37,9 @@ import org.springframework.util.MimeTypeUtils;
 import reactor.core.publisher.FluxSink;
 
 /**
- * A bounded Responses API model/tool loop. The live transcript retains the
- * model's MessagePart objects, including encrypted reasoning needed to replay
- * a Responses function call in the next request.
+ * A bounded Chat Completions model/tool loop. The live transcript retains
+ * assistant tool calls and tool results so they can be replayed in the next
+ * request using the standard role=assistant/role=tool protocol.
  */
 public final class AgentLoop {
     private static final Logger log = LoggerFactory.getLogger(AgentLoop.class);
@@ -53,22 +53,26 @@ public final class AgentLoop {
     private static final int MAX_IMAGE_BYTES = 5 * 1024 * 1024;
     private static final int MAX_TEXT_REPLAY_CHARS = 48_000;
 
-    private final ContextCompressor compressor = new ContextCompressor();
+    private final ContextCompressor compressor;
     private final ToolCallbackProvider toolProvider;
     private final SandboxPathResolver paths;
     private final MemoryTool memory;
     private final DlcProperties properties;
+    private final AgnesRequestRateLimiter rateLimiter;
     private final String systemTemplate;
     private volatile String agentMd;
     private volatile boolean textReplayRequired;
 
     public AgentLoop(ToolCallbackProvider toolProvider, SandboxPathResolver paths, MemoryTool memory,
-                     DlcProperties properties, String systemTemplate) {
+                     DlcProperties properties, String systemTemplate,
+                     AgnesRequestRateLimiter rateLimiter) {
         this.toolProvider = toolProvider;
         this.paths = paths;
         this.memory = memory;
         this.properties = properties;
         this.systemTemplate = systemTemplate;
+        this.rateLimiter = rateLimiter;
+        this.compressor = new ContextCompressor(rateLimiter);
         reloadAgentMd();
     }
 
@@ -90,7 +94,7 @@ public final class AgentLoop {
         agentMd = "";
     }
 
-    public void run(Session session, String input, FluxSink<StreamEvent> sink, OpenAiResponsesChatModel model) {
+    public void run(Session session, String input, FluxSink<StreamEvent> sink, OpenAiChatModel model) {
         ToolCallback[] callbacks = toolProvider.getToolCallbacks();
         Map<String, ToolCallback> tools = new HashMap<>();
         for (ToolCallback callback : callbacks) tools.put(callback.getToolDefinition().name(), callback);
@@ -126,13 +130,12 @@ public final class AgentLoop {
                 response = streamResponse(model, prompt, sink);
             } catch (RuntimeException e) {
                 if (!textReplayRequired && containsNativeReplay(messages) && isBadRequest(e)) {
-                    // Some Responses-compatible gateways reject Spring AI's
-                    // typed assistant output_text during stateless replay. Keep
-                    // the endpoint and loop; retry only the rejected request
+                    // Some OpenAI-compatible gateways reject typed history
+                    // during stateless replay. Retry only the rejected request
                     // with a bounded, role-safe textual history. No tool has
                     // been executed for this failed model request.
                     textReplayRequired = true;
-                    log.warn("Responses gateway rejected native history replay; using text replay for this provider");
+                    log.warn("Chat gateway rejected native history replay; using text replay for this provider");
                     step--;
                     continue;
                 }
@@ -177,8 +180,8 @@ public final class AgentLoop {
                 }
             }
 
-            // Keep the exact assistant message. Recreating it from text and
-            // tool calls would discard Responses reasoning and break replay.
+            // Keep the exact assistant message so Spring AI can serialize its
+            // assistant tool_calls for the next Chat Completions request.
             messages.add(answer);
             List<ToolResponseMessage.ToolResponse> results = new ArrayList<>();
             List<String> failedTools = new ArrayList<>();
@@ -224,7 +227,8 @@ public final class AgentLoop {
         throw new IllegalStateException("Maximum tool iterations (" + MAX_ITERATIONS + ") reached");
     }
 
-    private ChatResponse streamResponse(OpenAiResponsesChatModel model, Prompt prompt, FluxSink<StreamEvent> sink) {
+    private ChatResponse streamResponse(OpenAiChatModel model, Prompt prompt, FluxSink<StreamEvent> sink) {
+        rateLimiter.acquire();
         AtomicReference<ChatResponse> full = new AtomicReference<>();
         StringBuilder emitted = new StringBuilder();
         StringBuilder reasoning = new StringBuilder();

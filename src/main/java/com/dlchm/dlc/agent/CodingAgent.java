@@ -5,8 +5,8 @@ import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.tools.MemoryTool;
 import java.time.Duration;
-import org.springframework.ai.openai.responses.OpenAiResponsesChatModel;
-import org.springframework.ai.openai.responses.OpenAiResponsesChatOptions;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -18,7 +18,8 @@ import reactor.core.scheduler.Schedulers;
 public class CodingAgent {
     private final AgentLoop loop;
     private final DlcProperties properties;
-    private volatile OpenAiResponsesChatModel model;
+    private final AgnesRequestRateLimiter rateLimiter;
+    private volatile OpenAiChatModel model;
     private volatile String baseUrl;
     private volatile String apiKey;
     private volatile String modelName;
@@ -28,7 +29,9 @@ public class CodingAgent {
                        @Value("${spring.ai.openai.base-url}") String baseUrl,
                        @Value("${spring.ai.openai.api-key}") String apiKey,
                        @Value("${spring.ai.openai.chat.options.model}") String modelName) {
-        this.loop = new AgentLoop(toolCallbacks, pathResolver, memoryTool, properties, systemPromptTemplate);
+        this.rateLimiter = new AgnesRequestRateLimiter();
+        this.loop = new AgentLoop(toolCallbacks, pathResolver, memoryTool, properties,
+                systemPromptTemplate, rateLimiter);
         this.properties = properties;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
@@ -53,7 +56,7 @@ public class CodingAgent {
 
     public Flux<StreamEvent> stream(Session session, String userMessage) {
         return Flux.create(sink -> {
-            OpenAiResponsesChatModel current = model;
+            OpenAiChatModel current = model;
             var task = Schedulers.boundedElastic().schedule(() -> {
                 synchronized (session) {
                     try {
@@ -77,10 +80,10 @@ public class CodingAgent {
         return result.toString();
     }
 
-    private OpenAiResponsesChatModel buildModel() {
+    private OpenAiChatModel buildModel() {
         String url = baseUrl.strip().replaceAll("/+$", "");
         if (!url.endsWith("/v1")) url += "/v1";
-        var builder = OpenAiResponsesChatOptions.builder()
+        var builder = OpenAiChatOptions.builder()
                 .baseUrl(url)
                 .apiKey(apiKey)
                 .model(modelName)
@@ -88,8 +91,8 @@ public class CodingAgent {
                 .maxRetries(0)
                 .strict(false);
         if (properties.getMaxCompletionTokens() > 0) {
-            builder.maxOutputTokens(properties.getMaxCompletionTokens());
+            builder.maxCompletionTokens(properties.getMaxCompletionTokens());
         }
-        return OpenAiResponsesChatModel.builder().options(builder.build()).build();
+        return OpenAiChatModel.builder().options(builder.build()).build();
     }
 }
