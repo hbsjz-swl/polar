@@ -3,7 +3,10 @@ package com.dlchm.dlc.agent;
 import com.dlchm.dlc.config.DlcProperties;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.session.Session;
+import com.dlchm.dlc.session.MarkdownSessionStore;
+import com.dlchm.dlc.tools.ApprovalRequiredException;
 import com.dlchm.dlc.tools.MemoryTool;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -59,19 +62,24 @@ public final class AgentLoop {
     private final MemoryTool memory;
     private final DlcProperties properties;
     private final AgnesRequestRateLimiter rateLimiter;
+    private final ApprovalManager approvalManager;
+    private final MarkdownSessionStore sessionStore;
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private final String systemTemplate;
     private volatile String agentMd;
-    private volatile boolean textReplayRequired;
 
     public AgentLoop(ToolCallbackProvider toolProvider, SandboxPathResolver paths, MemoryTool memory,
                      DlcProperties properties, String systemTemplate,
-                     AgnesRequestRateLimiter rateLimiter) {
+                     AgnesRequestRateLimiter rateLimiter, ApprovalManager approvalManager,
+                     MarkdownSessionStore sessionStore) {
         this.toolProvider = toolProvider;
         this.paths = paths;
         this.memory = memory;
         this.properties = properties;
         this.systemTemplate = systemTemplate;
         this.rateLimiter = rateLimiter;
+        this.approvalManager = approvalManager;
+        this.sessionStore = sessionStore;
         this.compressor = new ContextCompressor(rateLimiter);
         reloadAgentMd();
     }
@@ -95,6 +103,16 @@ public final class AgentLoop {
     }
 
     public void run(Session session, String input, FluxSink<StreamEvent> sink, OpenAiChatModel model) {
+        try {
+            runInternal(session, input, sink, model);
+        } finally {
+            // The in-memory history is the last consistent checkpoint even if
+            // the caller cancels while a model/tool request is in flight.
+            sessionStore.save(session);
+        }
+    }
+
+    private void runInternal(Session session, String input, FluxSink<StreamEvent> sink, OpenAiChatModel model) {
         ToolCallback[] callbacks = toolProvider.getToolCallbacks();
         Map<String, ToolCallback> tools = new HashMap<>();
         for (ToolCallback callback : callbacks) tools.put(callback.getToolDefinition().name(), callback);
@@ -108,8 +126,12 @@ public final class AgentLoop {
         messages.addAll(session.getHistory());
         int inputCap = Math.max(4_000, Math.min(MAX_USER_CHARS, properties.getContextWindowTokens() * 2));
         messages.add(new UserMessage(limit(input, inputCap)));
+        // Checkpoint the user turn before the first network call so a client
+        // disconnect or process restart does not silently lose the request.
+        persist(session, messages);
 
         TokenUsage usage = new TokenUsage();
+        boolean textReplayRequired = false;
         int rollbacks = 0;
         Map<String, Integer> failures = new LinkedHashMap<>();
         List<String> recentText = new ArrayList<>();
@@ -190,6 +212,9 @@ public final class AgentLoop {
             for (AssistantMessage.ToolCall call : answer.getToolCalls()) {
                 String name = call.name() == null ? "unknown" : call.name();
                 log.info("Agent tool call: {}", name);
+                sink.next(new StreamEvent(StreamEvent.Type.TOOL_CALL_STARTED,
+                        jsonData(Map.of("id", call.id(), "name", name,
+                                "arguments", repairArguments(call.arguments())))));
                 ToolCallback callback = tools.get(name);
                 String result;
                 if (callback == null) {
@@ -197,11 +222,22 @@ public final class AgentLoop {
                 } else {
                     try {
                         result = callback.call(repairArguments(call.arguments()));
+                    } catch (ApprovalRequiredException approval) {
+                        result = awaitApproval(approval, callback, call.arguments(), name, sink);
                     } catch (Exception e) {
-                        result = "Error executing " + name + ": " + e.getMessage();
+                        ApprovalRequiredException approval = findApproval(e);
+                        result = approval == null
+                                ? "Error executing " + name + ": " + e.getMessage()
+                                : awaitApproval(approval, callback, call.arguments(), name, sink);
                     }
                 }
+                result = decodeToolResult(result);
                 result = limitToolResult(result, MAX_TOOL_RESULT_CHARS);
+                sink.next(new StreamEvent(StreamEvent.Type.TOOL_OUTPUT,
+                        jsonData(Map.of("id", call.id(), "name", name, "result", result))));
+                sink.next(new StreamEvent(StreamEvent.Type.TOOL_CALL_FINISHED,
+                        jsonData(Map.of("id", call.id(), "name", name,
+                                "success", !isToolFailure(result)))));
                 results.add(new ToolResponseMessage.ToolResponse(call.id(), name, result));
                 Matcher match = SCREENSHOT.matcher(result);
                 if (match.find()) lastScreenshot = match.group(1).trim();
@@ -222,6 +258,9 @@ public final class AgentLoop {
                 UserMessage screenshot = imageMessage(lastScreenshot);
                 if (screenshot != null) messages.add(screenshot);
             }
+            // Checkpoint after each tool exchange so cancellation during the
+            // following model request can still be resumed with tool context.
+            persist(session, messages);
         }
         persist(session, messages);
         throw new IllegalStateException("Maximum tool iterations (" + MAX_ITERATIONS + ") reached");
@@ -381,6 +420,53 @@ public final class AgentLoop {
             }
         }
         session.replaceHistory(history);
+        sessionStore.save(session);
+    }
+
+    private String jsonData(Object value) {
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (Exception e) {
+            return String.valueOf(value);
+        }
+    }
+
+    /** MethodToolCallback JSON-encodes String return values; keep transcript/tool errors readable. */
+    private String decodeToolResult(String result) {
+        if (result == null) return "";
+        String trimmed = result.trim();
+        if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            try {
+                var node = objectMapper.readTree(trimmed);
+                if (node != null && node.isTextual()) return node.textValue();
+            } catch (Exception ignored) {
+                // Preserve the original result when a provider returned a non-JSON string.
+            }
+        }
+        return result;
+    }
+
+    private String awaitApproval(ApprovalRequiredException approval, ToolCallback callback,
+                                 String rawArguments, String name, FluxSink<StreamEvent> sink) {
+        sink.next(new StreamEvent(StreamEvent.Type.APPROVAL_REQUIRED,
+                jsonData(Map.of("approvalId", approval.requestId(),
+                        "tool", approval.toolName(), "summary", approval.summary()))));
+        ApprovalManager.Decision decision = approvalManager.await(approval.requestId(), sink::isCancelled);
+        if (decision != ApprovalManager.Decision.APPROVED) {
+            return "Error: approval " + decision.name().toLowerCase() + " for " + name;
+        }
+        try {
+            return ExecutionContext.withApprovalBypass(() -> callback.call(repairArguments(rawArguments)));
+        } catch (Exception retryError) {
+            return "Error executing " + name + ": " + retryError.getMessage();
+        }
+    }
+
+    private ApprovalRequiredException findApproval(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof ApprovalRequiredException approval) return approval;
+        }
+        return null;
     }
 
     private static int value(Integer n) { return n == null ? 0 : n; }

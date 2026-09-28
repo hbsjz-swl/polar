@@ -2,7 +2,9 @@ package com.dlchm.dlc.session;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,12 +23,22 @@ public class SessionManager {
     private static final String CLI_SESSION_ID = "cli";
 
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
+    private final MarkdownSessionStore store;
+
+    public SessionManager(MarkdownSessionStore store) {
+        this.store = store;
+    }
 
     /**
      * 获取或创建会话。
      */
     public Session getOrCreate(String id, String channelType, String userId) {
-        Session session = sessions.computeIfAbsent(id, k -> new Session(id, channelType, userId));
+        String sessionId = id == null || id.isBlank() ? UUID.randomUUID().toString() : id;
+        Session session = sessions.computeIfAbsent(sessionId, k -> {
+            Session loaded = new Session(sessionId, channelType, userId);
+            loaded.replaceHistory(store.load(sessionId));
+            return loaded;
+        });
         session.touch();
         enforceCapacity();
         return session;
@@ -56,6 +68,40 @@ public class SessionManager {
      */
     public Session remove(String id) {
         return sessions.remove(id);
+    }
+
+    /** Resume a durable session by id, loading its Markdown transcript if needed. */
+    public Session resume(String id, String channelType, String userId) {
+        return getOrCreate(id, channelType, userId);
+    }
+
+    public void save(Session session) {
+        if (session != null) store.save(session);
+    }
+
+    public void clear(String id) {
+        Session session = get(id);
+        if (session != null) {
+            session.clearHistory();
+            store.save(session);
+        }
+    }
+
+    /** Fork a durable transcript into a new independent session. */
+    public Session fork(String sourceId, String channelType, String userId) {
+        Session source = getOrCreate(sourceId, channelType, userId);
+        Session copy = create(channelType, userId);
+        copy.replaceHistory(source.getHistory());
+        store.save(copy);
+        return copy;
+    }
+
+    public List<MarkdownSessionStore.SessionFile> listPersistedSessions() {
+        return store.list();
+    }
+
+    public MarkdownSessionStore getStore() {
+        return store;
     }
 
     /**

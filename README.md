@@ -12,6 +12,10 @@
 - 浏览器自动化（打开网页、点击、填写表单、截图等）
 - 持久记忆（跨会话记住项目信息和用户偏好）
 - 技能系统（安装/使用可复用的自动化工作流）
+- 会话持久化、恢复与分支（本地 Markdown）
+- 工具调用事件流、取消与人工审批
+- `polar exec --jsonl` 无交互执行模式
+- 有界的子 Agent 委派（独立会话、超时、取消）
 - 支持任意 OpenAI 兼容 API（通义千问、DeepSeek、GPT-4o、Ollama 等）
 - 首次启动交互式配置，无需手动编辑配置文件
 
@@ -128,8 +132,77 @@ polar
 |------|------|
 | `/config` | 重新配置 API 连接 |
 | `/clear` | 清屏并清除对话历史 |
+| `/sessions` | 列出本地已持久化的会话 |
+| `/resume <id>` | 恢复指定会话 |
+| `/fork` | 从当前会话创建一个独立分支 |
+| `/status` | 查看当前会话、活跃会话和审批状态 |
+| `/agents` | 查看当前会话的子 Agent 任务 |
 | `/quit` 或 `/exit` | 退出 |
 | `/forget` | 清除所有记忆 |
+
+### 会话持久化规则
+
+每个工作区的会话保存在 `<workspace>/.dlc/sessions/` 下，一个会话对应一个
+`<session-id>.md` 文件。文件是可读的 Markdown，消息正文和工具调用/返回值以 JSON
+记录保存，方便人工审阅或备份；文件名使用 URL-safe 编码，因此 API 传入的会话 ID
+不会穿越工作区边界。
+
+- 新会话第一次完成一轮、工具循环达到上限、出错或被取消时都会写入检查点。
+- Polar 重启后，`/resume <id>`、REST 的 `session/{id}/resume` 或 `--session <id>`
+  会从 Markdown 重建对话上下文；运行中的模型对象和线程不会写入文件。
+- 只保存对话、工具调用和经过截断的工具结果，不保存 API Key、Base URL 或其他配置；
+  常见 `api-key`、`token`、`secret`、`password`、Bearer 和密钥前缀会在落盘前做脱敏。
+- `/clear` 会清空内存历史并覆盖对应 Markdown 文件；删除会话文件即可彻底移除该会话。
+- 会话仍受消息数和字符数上限约束，恢复时会使用与在线会话相同的裁剪规则。
+
+### 权限、审批和进程隔离
+
+`READ_ONLY` 禁止 shell；`STANDARD` 对删除、`sudo` 等高风险命令暂停并发出
+`APPROVAL_REQUIRED` 事件，得到确认后才会执行；`AUTONOMOUS` 直接执行策略允许的命令。
+所有命令都以工作区为当前目录，并在 macOS 的 Seatbelt 或 Linux 的 bubblewrap 可用时
+启用原生写入隔离；其他系统仍使用工作区路径策略。超时会递归终止子进程树，避免后台
+进程泄漏。
+
+审批接口：
+
+```text
+GET  /api/session/{id}/approvals
+POST /api/approval/{approvalId}  {"approved":true|false}
+POST /api/session/{sessionId}/approval/{approvalId}  {"approved":true|false}
+```
+
+WebSocket 客户端可发送 `{"approvalId":"...","approved":true}`。SSE、WebSocket
+和 CLI 都会收到相同的结构化事件。
+
+### 无交互执行（JSONL）
+
+适合脚本、CI 或外部编排器：
+
+```bash
+polar exec --jsonl "检查当前项目并修复测试失败"
+polar exec --jsonl --session my-session "继续上一次任务"
+cat task.txt | polar exec --jsonl
+```
+
+每行包含 `type`、`data` 和 `sessionId`。事件类型包括 `TOKEN`、`REASONING`、
+`TOOL_CALL_STARTED`、`TOOL_OUTPUT`、`TOOL_CALL_FINISHED`、`APPROVAL_REQUIRED`、
+`TURN_COMPLETED` 和 `TURN_FAILED`。
+
+### 子 Agent
+
+模型可通过 `delegate_task` 将独立、可复核的任务交给子 Agent。子 Agent 使用新的会话，
+受并发数、最大深度和超时限制，结果以工具输出回传；可以通过 `/agents` 或
+`GET /api/session/{id}/agents` 查看，并使用 `POST /api/agent/{taskId}/cancel` 取消。
+
+### HTTP / WebSocket
+
+- `POST /api/chat`：同步 JSON 对话。
+- `POST /api/chat/stream`：SSE 事件流。
+- WebSocket：默认路径 `/ws/agent`，入站 `{"message":"..."}`，出站为同一事件协议。
+- `GET /api/sessions`、`POST /api/session/{id}/resume`、`POST /api/session/{id}/fork`：
+  管理本地持久化会话。
+- REST 请求可通过 `X-Polar-User`（或 JSON 的 `userId`）绑定会话所有者；不同所有者
+  访问非匿名会话会返回 `403`。
 
 ---
 

@@ -1,10 +1,13 @@
 package com.dlchm.dlc.tools;
 
 import com.dlchm.dlc.config.DlcProperties;
+import com.dlchm.dlc.agent.ApprovalManager;
+import com.dlchm.dlc.agent.ExecutionContext;
 import com.dlchm.dlc.sandbox.BashCommandSandbox;
 import com.dlchm.dlc.sandbox.PermissionMode;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.sandbox.SandboxViolationException;
+import com.dlchm.dlc.sandbox.ProcessIsolation;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.concurrent.TimeUnit;
@@ -18,14 +21,17 @@ public class BashExecuteTool {
     private final ToolOutputTruncator truncator;
     private final int timeoutSeconds;
     private final PermissionMode mode;
+    private final ApprovalManager approvalManager;
 
     public BashExecuteTool(SandboxPathResolver pathResolver, BashCommandSandbox commandSandbox,
-                           ToolOutputTruncator truncator, DlcProperties props) {
+                           ToolOutputTruncator truncator, DlcProperties props,
+                           ApprovalManager approvalManager) {
         this.pathResolver = pathResolver;
         this.commandSandbox = commandSandbox;
         this.truncator = truncator;
         this.timeoutSeconds = props.getBashTimeoutSeconds();
         this.mode = PermissionMode.valueOf(props.getPermissionMode());
+        this.approvalManager = approvalManager;
     }
 
     @Tool(name = "bash_execute", description = "Execute a shell command with timeout. Subject to sandbox restrictions.")
@@ -35,14 +41,18 @@ public class BashExecuteTool {
         if (mode == PermissionMode.READ_ONLY) throw new SandboxViolationException("Bash disabled in READ_ONLY mode.");
 
         BashCommandSandbox.ValidationResult v = commandSandbox.validate(command);
-        if (v.requiresConfirmation() && mode == PermissionMode.STANDARD) {
-            return "CONFIRMATION_REQUIRED: " + v.reason() + "\nCommand not executed: " + command;
+        if (v.requiresConfirmation() && mode == PermissionMode.STANDARD
+                && !ExecutionContext.approvalBypass()) {
+            ApprovalManager.Request request = approvalManager.request(
+                    ExecutionContext.sessionId(), "bash_execute",
+                    v.reason() + ": " + command);
+            throw new ApprovalRequiredException(request.id(), request.toolName(), request.summary());
         }
 
         int timeout = (timeoutOverride != null && timeoutOverride > 0)
                 ? Math.min(timeoutOverride, 300) : timeoutSeconds;
         try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
+            ProcessBuilder pb = new ProcessBuilder(ProcessIsolation.command(pathResolver.getWorkspaceRoot(), command));
             pb.directory(pathResolver.getWorkspaceRoot().toFile());
             pb.redirectErrorStream(true);
             Process process = pb.start();
@@ -63,7 +73,7 @@ public class BashExecuteTool {
             readerThread.setDaemon(true);
             readerThread.start();
             if (!process.waitFor(timeout, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
+                ProcessIsolation.destroyTree(process);
                 return truncator.truncate("Timed out after " + timeout + "s.\n" + output);
             }
             readerThread.join(1_000);

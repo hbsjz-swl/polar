@@ -3,6 +3,7 @@ package com.dlchm.dlc.agent;
 import com.dlchm.dlc.config.DlcProperties;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.session.Session;
+import com.dlchm.dlc.session.MarkdownSessionStore;
 import com.dlchm.dlc.tools.MemoryTool;
 import java.time.Duration;
 import org.springframework.ai.openai.OpenAiChatModel;
@@ -19,6 +20,7 @@ public class CodingAgent {
     private final AgentLoop loop;
     private final DlcProperties properties;
     private final AgnesRequestRateLimiter rateLimiter;
+    private final ApprovalManager approvalManager;
     private volatile OpenAiChatModel model;
     private volatile String baseUrl;
     private volatile String apiKey;
@@ -26,12 +28,14 @@ public class CodingAgent {
 
     public CodingAgent(ToolCallbackProvider toolCallbacks, SandboxPathResolver pathResolver,
                        MemoryTool memoryTool, DlcProperties properties, String systemPromptTemplate,
+                       ApprovalManager approvalManager, MarkdownSessionStore sessionStore,
                        @Value("${spring.ai.openai.base-url}") String baseUrl,
                        @Value("${spring.ai.openai.api-key}") String apiKey,
                        @Value("${spring.ai.openai.chat.options.model}") String modelName) {
         this.rateLimiter = new AgnesRequestRateLimiter();
+        this.approvalManager = approvalManager;
         this.loop = new AgentLoop(toolCallbacks, pathResolver, memoryTool, properties,
-                systemPromptTemplate, rateLimiter);
+                systemPromptTemplate, rateLimiter, approvalManager, sessionStore);
         this.properties = properties;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
@@ -57,17 +61,32 @@ public class CodingAgent {
     public Flux<StreamEvent> stream(Session session, String userMessage) {
         return Flux.create(sink -> {
             OpenAiChatModel current = model;
+            if (!sink.isCancelled()) {
+                sink.next(new StreamEvent(StreamEvent.Type.TURN_STARTED,
+                        "{\"sessionId\":\"" + escape(session.getId()) + "\"}"));
+            }
             var task = Schedulers.boundedElastic().schedule(() -> {
                 synchronized (session) {
                     try {
-                        loop.run(session, userMessage, sink, current);
+                        ExecutionContext.run(session, 0,
+                                () -> loop.run(session, userMessage, sink, current));
+                        if (!sink.isCancelled()) {
+                            sink.next(new StreamEvent(StreamEvent.Type.TURN_COMPLETED, "{}"));
+                        }
                         if (!sink.isCancelled()) sink.complete();
                     } catch (Throwable e) {
-                        if (!sink.isCancelled()) sink.error(e);
+                        if (!sink.isCancelled()) {
+                            sink.next(new StreamEvent(StreamEvent.Type.TURN_FAILED,
+                                    "{\"error\":\"" + escape(String.valueOf(e.getMessage())) + "\"}"));
+                            sink.error(e);
+                        }
                     }
                 }
             });
-            sink.onCancel(task::dispose);
+            sink.onCancel(() -> {
+                task.dispose();
+                approvalManager.cancelSession(session.getId());
+            });
         });
     }
 
@@ -94,5 +113,10 @@ public class CodingAgent {
             builder.maxCompletionTokens(properties.getMaxCompletionTokens());
         }
         return OpenAiChatModel.builder().options(builder.build()).build();
+    }
+
+    private static String escape(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\")
+                .replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 }

@@ -12,6 +12,10 @@ import com.dlchm.dlc.tools.SkillsTool;
 import com.dlchm.dlc.tools.ToolOutputTruncator;
 import com.dlchm.dlc.tools.BrowserTool;
 import com.dlchm.dlc.tools.WriteFileTool;
+import com.dlchm.dlc.tools.SubagentTool;
+import com.dlchm.dlc.agent.SubagentManager;
+import com.dlchm.dlc.session.MarkdownSessionStore;
+import com.dlchm.dlc.agent.ApprovalManager;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -38,6 +42,11 @@ public class AgentConfiguration {
     @Bean
     public SandboxPathResolver sandboxPathResolver(DlcProperties props) {
         return new SandboxPathResolver(props.getWorkspace(), props.getBlockedPaths());
+    }
+
+    @Bean
+    public MarkdownSessionStore markdownSessionStore(SandboxPathResolver pathResolver) {
+        return new MarkdownSessionStore(pathResolver);
     }
 
     @Bean
@@ -74,16 +83,19 @@ public class AgentConfiguration {
             DlcProperties props,
             SkillsTool skillsTool,
             MemoryTool memoryTool,
-            BrowserTool browserTool) {
+            BrowserTool browserTool,
+            ApprovalManager approvalManager,
+            SubagentManager subagentManager) {
         List<Object> tools = new ArrayList<>();
         tools.add(new ReadFileTool(pathResolver, truncator));
         tools.add(new WriteFileTool(pathResolver, props));
         tools.add(new EditFileTool(pathResolver, props));
         tools.add(new GlobSearchTool(pathResolver, truncator));
         tools.add(new GrepSearchTool(pathResolver, truncator));
-        tools.add(new BashExecuteTool(pathResolver, bashSandbox, truncator, props));
+        tools.add(new BashExecuteTool(pathResolver, bashSandbox, truncator, props, approvalManager));
         tools.add(memoryTool);
         tools.add(browserTool);
+        tools.add(new SubagentTool(subagentManager));
         if (skillsTool.hasSkills()) {
             tools.add(skillsTool);
         }

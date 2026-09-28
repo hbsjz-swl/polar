@@ -1,6 +1,7 @@
 package com.dlchm.dlc.channel.websocket;
 
 import com.dlchm.dlc.agent.CodingAgent;
+import com.dlchm.dlc.agent.ApprovalManager;
 import com.dlchm.dlc.agent.StreamEvent;
 import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.session.SessionManager;
@@ -28,11 +29,14 @@ public class AgentWebSocketHandler implements WebSocketHandler {
 
     private final CodingAgent agent;
     private final SessionManager sessionManager;
+    private final ApprovalManager approvalManager;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    public AgentWebSocketHandler(CodingAgent agent, SessionManager sessionManager) {
+    public AgentWebSocketHandler(CodingAgent agent, SessionManager sessionManager,
+                                 ApprovalManager approvalManager) {
         this.agent = agent;
         this.sessionManager = sessionManager;
+        this.approvalManager = approvalManager;
     }
 
     @Override
@@ -52,6 +56,14 @@ public class AgentWebSocketHandler implements WebSocketHandler {
         Mono<Void> inbound = wsSession.receive()
                 .map(WebSocketMessage::getPayloadAsText)
                 .flatMap(text -> {
+                    JsonNode command = parseJson(text);
+                    if (command != null && command.has("approvalId")) {
+                        String approvalId = command.path("approvalId").asText("");
+                        boolean approved = command.path("approved").asBoolean(false);
+                        if (approved) approvalManager.approve(approvalId);
+                        else approvalManager.deny(approvalId);
+                        return Mono.empty();
+                    }
                     String message = extractMessage(text);
                     if (message == null || message.isBlank()) {
                         return Mono.empty();
@@ -72,6 +84,7 @@ public class AgentWebSocketHandler implements WebSocketHandler {
                 .then()
                 .doFinally(signal -> {
                     outSink.tryEmitComplete();
+                    approvalManager.cancelSession(session.getId());
                     sessionManager.remove(session.getId());
                     log.debug("WebSocket disconnected: session={}", session.getId());
                 });
@@ -85,10 +98,20 @@ public class AgentWebSocketHandler implements WebSocketHandler {
 
     private String extractMessage(String json) {
         try {
-            JsonNode node = objectMapper.readTree(json);
+            JsonNode node = parseJson(json);
+            if (node == null) return json;
             return node.path("message").asText(null);
         } catch (Exception e) {
             return json; // Treat as plain text message
+        }
+    }
+
+    private JsonNode parseJson(String json) {
+        try {
+            JsonNode node = objectMapper.readTree(json);
+            return node != null && node.isObject() ? node : null;
+        } catch (Exception e) {
+            return null;
         }
     }
 

@@ -10,8 +10,9 @@ import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 
 /**
- * In-process conversation memory. Spring AI message parts are retained intact,
- * including Responses reasoning payloads needed for lossless tool-loop replay.
+ * In-memory working set for one conversation. The {@link MarkdownSessionStore}
+ * owns the durable Markdown copy; keeping this object small makes active turns
+ * cheap while allowing a process restart to restore the transcript.
  */
 public class Session {
     private static final int MAX_MESSAGES = 60;

@@ -1,6 +1,8 @@
 package com.dlchm.dlc.cli;
 
 import com.dlchm.dlc.agent.CodingAgent;
+import com.dlchm.dlc.agent.ApprovalManager;
+import com.dlchm.dlc.agent.SubagentManager;
 import com.dlchm.dlc.agent.StreamEvent;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.session.Session;
@@ -19,6 +21,8 @@ import org.jline.reader.UserInterruptException;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 import org.springframework.stereotype.Component;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * 终端交互界面。
@@ -45,15 +49,21 @@ public class DlcCli {
     private final ToolCallbackProvider toolCallbackProvider;
     private final SessionManager sessionManager;
     private final com.dlchm.dlc.tools.MemoryTool memoryTool;
+    private final ApprovalManager approvalManager;
+    private final SubagentManager subagentManager;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public DlcCli(CodingAgent agent, SandboxPathResolver pathResolver,
                   ToolCallbackProvider toolCallbackProvider, SessionManager sessionManager,
-                  com.dlchm.dlc.tools.MemoryTool memoryTool) {
+                  com.dlchm.dlc.tools.MemoryTool memoryTool, ApprovalManager approvalManager,
+                  SubagentManager subagentManager) {
         this.agent = agent;
         this.pathResolver = pathResolver;
         this.toolCallbackProvider = toolCallbackProvider;
         this.sessionManager = sessionManager;
         this.memoryTool = memoryTool;
+        this.approvalManager = approvalManager;
+        this.subagentManager = subagentManager;
     }
 
     public void run() {
@@ -75,7 +85,7 @@ public class DlcCli {
                      .ifPresent(p -> System.out.println(
                              ANSI_GREEN + p.getFileName() + ": loaded" + ANSI_RESET));
             } catch (Exception ignored) {}
-            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /forget to clear memory, /config to reconfigure, /install <skill> to install." + ANSI_RESET);
+            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /sessions to list, /resume <id> to resume, /fork to branch, /forget to clear memory, /config to reconfigure." + ANSI_RESET);
             System.out.println();
 
             while (true) {
@@ -94,10 +104,49 @@ public class DlcCli {
                     break;
                 }
                 if ("/clear".equalsIgnoreCase(trimmed)) {
-                    session.clearHistory();
+                    sessionManager.clear(session.getId());
                     System.out.print("\033[H\033[2J");
                     System.out.flush();
                     System.out.println(ANSI_DIM + "History cleared." + ANSI_RESET);
+                    continue;
+                }
+                if ("/sessions".equalsIgnoreCase(trimmed)) {
+                    var persisted = sessionManager.listPersistedSessions();
+                    if (persisted.isEmpty()) {
+                        System.out.println(ANSI_DIM + "No persisted sessions." + ANSI_RESET);
+                    } else {
+                        persisted.forEach(item -> System.out.println(item.id() + "  " + item.updatedAt()));
+                    }
+                    continue;
+                }
+                if (trimmed.toLowerCase().startsWith("/resume ")) {
+                    String id = trimmed.substring(8).trim();
+                    if (id.isBlank()) {
+                        System.out.println(ANSI_YELLOW + "用法: /resume <session-id>" + ANSI_RESET);
+                    } else {
+                        session = sessionManager.resume(id, "cli", "local");
+                        System.out.println(ANSI_GREEN + "已恢复会话 " + session.getId()
+                                + "（" + session.getHistory().size() + " 条消息）" + ANSI_RESET);
+                    }
+                    continue;
+                }
+                if ("/fork".equalsIgnoreCase(trimmed)) {
+                    session = sessionManager.fork(session.getId(), "cli", "local");
+                    System.out.println(ANSI_GREEN + "已创建分支会话 " + session.getId() + ANSI_RESET);
+                    continue;
+                }
+                if ("/status".equalsIgnoreCase(trimmed)) {
+                    System.out.println(ANSI_DIM + "session=" + session.getId()
+                            + ", messages=" + session.getHistory().size()
+                            + ", active=" + sessionManager.getActiveSessionCount()
+                            + ", approvals=" + approvalManager.pending(session.getId()).size()
+                            + ANSI_RESET);
+                    continue;
+                }
+                if ("/agents".equalsIgnoreCase(trimmed)) {
+                    subagentManager.list(session.getId()).forEach(task ->
+                            System.out.println(task.id() + "  " + task.status()
+                                    + "  child=" + task.childSessionId()));
                     continue;
                 }
                 if ("/config".equalsIgnoreCase(trimmed)) {
@@ -134,14 +183,14 @@ public class DlcCli {
                     continue;
                 }
 
-                processMessage(session, trimmed);
+                processMessage(session, trimmed, reader);
             }
         } catch (Exception e) {
             System.err.println("Terminal error: " + e.getMessage());
         }
     }
 
-    private void processMessage(Session session, String userMessage) {
+    private void processMessage(Session session, String userMessage, LineReader reader) {
         System.out.println();
         System.out.print(ANSI_CYAN + "polar> " + ANSI_RESET);
 
@@ -157,6 +206,8 @@ public class DlcCli {
         agent.stream(session, userMessage)
                 .subscribe(
                         event -> {
+                            if (event.type() == StreamEvent.Type.TURN_STARTED
+                                    || event.type() == StreamEvent.Type.TURN_COMPLETED) return;
                             if (event.type() == StreamEvent.Type.USAGE) {
                                 usageInfo[0] = event.data();
                                 return;
@@ -174,6 +225,16 @@ public class DlcCli {
                                         + ANSI_DIM + spin + " thinking... (" + elapsed + "s)"
                                         + ANSI_RESET + "\033[K");
                                 System.out.flush();
+                            } else if (event.type() == StreamEvent.Type.APPROVAL_REQUIRED) {
+                                handleApproval(event.data(), reader);
+                            } else if (event.type() == StreamEvent.Type.TOOL_CALL_STARTED) {
+                                System.out.println("\n" + ANSI_DIM + "[tool] " + event.data() + ANSI_RESET);
+                            } else if (event.type() == StreamEvent.Type.TOOL_OUTPUT
+                                    || event.type() == StreamEvent.Type.TOOL_CALL_FINISHED) {
+                                // Tool details are available in the structured event stream;
+                                // keep the interactive transcript readable.
+                            } else if (event.type() == StreamEvent.Type.CANCELLED) {
+                                System.out.println("\n" + ANSI_YELLOW + "Turn cancelled." + ANSI_RESET);
                             } else {
                                 if (inReasoning[0]) {
                                     inReasoning[0] = false;
@@ -224,6 +285,23 @@ public class DlcCli {
             latch.await();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private void handleApproval(String data, LineReader reader) {
+        try {
+            JsonNode node = objectMapper.readTree(data);
+            String id = node.path("approvalId").asText("");
+            String summary = node.path("summary").asText("");
+            String answer = reader.readLine("\n" + ANSI_YELLOW + "Approve " + summary
+                    + "? [y/N] " + ANSI_RESET);
+            if (answer != null && (answer.equalsIgnoreCase("y") || answer.equalsIgnoreCase("yes"))) {
+                approvalManager.approve(id);
+            } else {
+                approvalManager.deny(id);
+            }
+        } catch (Exception e) {
+            System.out.println(ANSI_YELLOW + "Approval input failed: " + e.getMessage() + ANSI_RESET);
         }
     }
 
