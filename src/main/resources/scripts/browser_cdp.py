@@ -2,7 +2,9 @@
 """Observe and operate a long-lived Chrome over CDP without launching more windows."""
 import argparse
 import json
+import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
@@ -11,7 +13,15 @@ DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 SUPPORTED = {'goto', 'click', 'click_xy', 'fill', 'type', 'select', 'check', 'uncheck',
              'hover', 'press', 'scroll', 'screenshot', 'get_text', 'get_attr', 'evaluate',
              'wait', 'assert', 'back', 'forward', 'reload'}
-TARGETED = {'click', 'fill', 'type', 'select', 'check', 'uncheck', 'hover', 'get_text', 'get_attr'}
+# Actions that cannot run without an element target. `type` is deliberately absent:
+# with no target it types into whatever the page has focused, which is the natural
+# "click_xy then type" flow a model reaches for on a search box.
+TARGETED = {'click', 'fill', 'select', 'check', 'uncheck', 'hover', 'get_text', 'get_attr'}
+
+# A percent-escape whose byte is >= 0x80 means non-ASCII (almost always Chinese) was
+# hand-encoded into the URL instead of typed into the site's own input box. That is
+# how a real run produced a garbled city search and a 30s hang.
+NON_ASCII_ESCAPE = re.compile(r'%[89A-Fa-f][0-9A-Fa-f]')
 
 
 def connect_browser(p, cdp_url):
@@ -80,8 +90,10 @@ def view_page(page, screenshot_path=None):
     return info
 
 
-# Keys that identify an element rather than carry a value.
-TARGET_KEYS = ('selector', 'ref', 'role', 'label')
+def target_hint(action):
+    """The exact JSON to write once a target is missing, so the next try succeeds."""
+    value = ',"value":"..."' if action in ('fill', 'select') else ''
+    return '{"action":"%s","ref":"e3"%s}' % (action, value)
 
 
 def has_target(act):
@@ -89,17 +101,40 @@ def has_target(act):
 
 
 def normalize_action(act):
-    """Accept `text` as a value alias when the element is targeted another way.
+    """Fold the natural-but-unofficial parameter spellings onto the canonical ones.
 
-    A model writing {"action":"type","selector":"#d","text":"2026-10-02"} means the
-    text is the value, not a text= locator. The presence of an explicit target key
-    is what disambiguates the two overloaded meanings of `text`.
+    A rejected guess costs a whole tool round trip, and one run spent four calls
+    re-typing the same intent with `text`, `keys` and `ms`. Each alias below is
+    unambiguous, so it is accepted rather than errored:
+
+    - `text` on fill/type/select is always the *value*: a text box is never located
+      by its own content, so the two meanings of `text` cannot collide.
+    - `keys` on press is `key` (e.g. "Control+A").
     """
-    if act.get('action') in ('fill', 'type', 'select') and 'value' not in act \
-            and 'text' in act and any(act.get(k) for k in TARGET_KEYS):
+    action = act.get('action')
+    if action in ('fill', 'type', 'select') and 'value' not in act and 'text' in act:
         act = dict(act)
         act['value'] = act.pop('text')
+    if action == 'press' and 'key' not in act and 'keys' in act:
+        act = dict(act)
+        act['key'] = act.pop('keys')
     return act
+
+
+def wait_millis(act):
+    """Sleep duration for a bare `wait`, accepting the spellings models actually use.
+
+    `ms` and `timeout` are milliseconds. A bare `time` is read as seconds when it is
+    small ("time": 6 meaning six seconds) and as milliseconds otherwise.
+    """
+    for key in ('ms', 'timeout'):
+        if act.get(key) is not None:
+            return max(0, min(10000, int(act[key])))
+    if act.get('time') is not None:
+        value = float(act['time'])
+        millis = value * 1000 if value <= 30 else value
+        return max(0, min(10000, int(millis)))
+    return 2000
 
 
 def target_candidates(page, act):
@@ -148,24 +183,65 @@ def pick_target(page, act):
 
 
 def validate_actions(actions):
+    """Batch shape only: normalising every action up front keeps field checks simple.
+
+    Field-level checks live in validate_step so a typo in one action reports against
+    that step and leaves the actions before it executed. A single misspelled
+    parameter used to discard the whole batch before anything ran.
+    """
     if not isinstance(actions, list) or not 1 <= len(actions) <= 20:
         raise ValueError('actions must be an array with 1..20 actions')
     for index, act in enumerate(actions):
         if not isinstance(act, dict) or act.get('action') not in SUPPORTED:
-            raise ValueError(f'Unsupported action: {act}')
-        act = normalize_action(act)
-        actions[index] = act
-        action = act['action']
-        if action in TARGETED and not has_target(act):
-            raise ValueError(f'{action} requires an element target')
-        if action == 'goto' and urlparse(act.get('url', '')).scheme not in ('http', 'https', 'about', 'file'):
-            raise ValueError('goto requires an absolute http(s), about or file URL')
-        if action == 'click_xy' and not all(isinstance(act.get(k), (int, float)) and act[k] >= 0 for k in ('x', 'y')):
-            raise ValueError('click_xy requires non-negative x/y viewport coordinates')
-        if action in ('fill', 'type', 'select') and 'value' not in act:
-            raise ValueError(f'{action} requires value')
-        if action == 'assert' and not (has_target(act) or act.get('url')):
-            raise ValueError('assert requires a target or URL pattern')
+            raise ValueError(f'Unsupported action {act}; supported: {sorted(SUPPORTED)}')
+        actions[index] = normalize_action(act)
+
+
+def validate_step(act):
+    """Field checks for one action. Every message names the accepted spelling, so the
+    next attempt is correct instead of another guess (each guess costs a round trip)."""
+    action = act['action']
+    if action in TARGETED and not has_target(act):
+        raise ValueError(f'{action} requires an element target: pass "ref" from the latest '
+                         f'observation, or selector / role+name / label. Example: {target_hint(action)}')
+    if action == 'goto':
+        url = act.get('url', '')
+        if urlparse(url).scheme not in ('http', 'https', 'about', 'file'):
+            raise ValueError('goto requires an absolute URL: {"action":"goto","url":"https://example.com"}')
+        if NON_ASCII_ESCAPE.search(url):
+            raise ValueError(
+                'Refusing a URL with hand-encoded non-ASCII (e.g. %E7%9F%B3). Do not hand-write '
+                'Chinese into a URL: type it into the site\'s own input box and pick its suggestion, '
+                'or reuse a result-page URL that already loaded. For a link already on the page, '
+                'click it instead of using goto.')
+    if action == 'click_xy' and not all(isinstance(act.get(k), (int, float)) and act[k] >= 0 for k in ('x', 'y')):
+        raise ValueError('click_xy requires non-negative x/y viewport coordinates: '
+                         '{"action":"click_xy","x":120,"y":340}')
+    if action in ('fill', 'type', 'select') and 'value' not in act:
+        raise ValueError('"%s" requires "value" (the text to enter), not "text". Use '
+                         '{"action":"%s","ref":"e3","value":"..."}; with no target, "type" types '
+                         'into whatever the page has focused.' % (action, action))
+    if action == 'press' and not act.get('key'):
+        raise ValueError('press requires "key", e.g. {"action":"press","key":"Control+A"} '
+                         'or {"action":"press","key":"Enter"}')
+    if action == 'assert' and not (has_target(act) or act.get('url') or 'contains' in act):
+        raise ValueError('assert requires a target, a "url" pattern, or "contains": '
+                         '{"action":"assert","contains":"¥"}')
+    if isinstance(act.get('text'), str) and '\n' in act['text']:
+        raise ValueError('"text" targets must be a single line — an exact multi-line match never '
+                         'resolves. Use "ref" from the latest observation, or a short stable substring.')
+
+
+def stop_loading(page):
+    """Best-effort abort of a stuck navigation so the next call is not blocked.
+
+    An unfinished navigation keeps the renderer busy; without this the follow-up
+    CDP commands time out and the session looks dead for the rest of the turn.
+    """
+    try:
+        page.evaluate('() => window.stop()')
+    except Exception:
+        pass
 
 
 def settle(page):
@@ -176,6 +252,40 @@ def settle(page):
     except Exception:
         pass
     page.wait_for_timeout(150)
+
+
+def settle_dynamic(page, budget_ms=2000, step_ms=350):
+    """Give an async-rendered page a bounded chance to finish before it is read.
+
+    A modern results page commits its DOM long before the content arrives: the
+    flight list renders its price rows from a later XHR, so `domcontentloaded` is
+    not evidence that the prices are on the page. Reading at that moment yields a
+    skeleton, and the model then either reports nothing or reuses a value it saw on
+    another page. Waiting for the visible text to STOP GROWING catches that gap
+    without coupling to any site's selector, element id or price format.
+
+    Bounded on both ends: a page already stable costs one extra probe, and a page
+    that never settles costs at most `budget_ms` so this cannot become the next
+    hung navigation.
+    """
+    deadline = time.monotonic() + budget_ms / 1000.0
+    previous = None
+    while True:
+        try:
+            length = page.evaluate('() => (document.body ? document.body.innerText.length : 0)')
+        except Exception:
+            return
+        # Two identical non-empty readings mean rendering has paused long enough
+        # to be worth reading; an empty body keeps polling until the budget ends.
+        if previous is not None and length == previous and length > 0:
+            return
+        previous = length
+        if time.monotonic() >= deadline:
+            return
+        try:
+            page.wait_for_timeout(step_ms)
+        except Exception:
+            return
 
 
 def state_fingerprint(page):
@@ -194,6 +304,7 @@ def perform_actions(page, actions, screenshot_path=None):
         action = act['action']
         step = {'step': i + 1, 'action': action, 'success': True}
         try:
+            validate_step(act)
             timeout = min(15000, max(100, int(act.get('timeout', 7000))))
             before_pages = list(page.context.pages)
             target = None
@@ -201,21 +312,47 @@ def perform_actions(page, actions, screenshot_path=None):
                 target, narrowed = pick_target(page, act)
                 if narrowed:
                     step['narrowed'] = True
-            if action in TARGETED | {'press'} and target is not None:
+            # wait/assert may legitimately target an element that has not appeared
+            # yet, so the "nothing there" verdict only applies to actions that need
+            # the target right now. A stale ref otherwise surfaces as a raw
+            # Playwright timeout, which reads like a page problem instead of "your
+            # ref is from before the page changed — observe again".
+            if target is not None and action not in ('wait', 'assert'):
                 try:
-                    unique = target.count() == 1
+                    count = target.count()
                 except Exception:
-                    unique = False
-                if unique and not target.is_visible():
+                    count = None
+                if count == 0:
+                    if act.get('ref'):
+                        where = 'ref "%s" is stale (the page changed after the observation)' % act['ref']
+                    elif act.get('selector'):
+                        where = 'selector %r matched nothing' % act['selector']
+                    else:
+                        where = 'the target did not resolve'
+                    raise ValueError('Target not found: %s. Call browser_view and use a fresh "ref" '
+                                     'from final.interactive_elements instead of retrying this one.' % where)
+                if action in TARGETED | {'press', 'type'} and count == 1 and not target.is_visible():
                     raise ValueError('Target is hidden. Choose the visible textarea/input/button ref from final.interactive_elements; do not retry this hidden selector.')
             before_state = state_fingerprint(page) if action in ('click', 'click_xy', 'press') else None
             if action == 'goto':
-                response = page.goto(act['url'], timeout=30000, wait_until='domcontentloaded')
+                # 'commit' returns as soon as the navigation commits. Waiting for
+                # domcontentloaded on a host that never answers blocks for 30s and can
+                # leave the whole browser unresponsive; the explicit wait/assert steps
+                # (and settle below) are what confirm the page actually arrived.
+                try:
+                    response = page.goto(act['url'], timeout=20000, wait_until='commit')
+                except Exception:
+                    stop_loading(page)
+                    raise
                 if response is not None and response.status >= 400:
                     raise RuntimeError(f'HTTP {response.status} at {page.url}')
             elif action in ('back', 'forward', 'reload'):
                 method = {'back': page.go_back, 'forward': page.go_forward, 'reload': page.reload}[action]
-                method(wait_until='domcontentloaded', timeout=30000)
+                try:
+                    method(wait_until='commit', timeout=20000)
+                except Exception:
+                    stop_loading(page)
+                    raise
             elif action in ('click', 'check', 'uncheck', 'hover'):
                 getattr(target, action)(timeout=timeout)
             elif action == 'click_xy':
@@ -226,14 +363,20 @@ def perform_actions(page, actions, screenshot_path=None):
             elif action == 'fill':
                 target.fill(str(act['value']), timeout=timeout)
             elif action == 'type':
-                target.press_sequentially(str(act['value']), timeout=timeout)
+                if target is not None:
+                    target.press_sequentially(str(act['value']), timeout=timeout)
+                else:
+                    # No target: type into whatever the page has focused. This is the
+                    # "click_xy on the search box, then type" flow, and Playwright's
+                    # keyboard.type does exactly that — the click already set focus.
+                    page.keyboard.type(str(act['value']), delay=0)
             elif action == 'select':
                 target.select_option(act['value'], timeout=timeout)
             elif action == 'press':
                 if target is not None:
-                    target.press(act.get('key', 'Enter'), timeout=timeout)
+                    target.press(act['key'], timeout=timeout)
                 else:
-                    page.keyboard.press(act.get('key', 'Enter'))
+                    page.keyboard.press(act['key'])
             elif action == 'scroll':
                 amount = min(3000, max(0, int(act.get('amount', 500))))
                 page.mouse.wheel(0, amount if act.get('direction', 'down') == 'down' else -amount)
@@ -252,8 +395,14 @@ def perform_actions(page, actions, screenshot_path=None):
                     target.wait_for(state=act.get('state', 'visible'), timeout=timeout)
                     if 'contains' in act and act['contains'] not in target.inner_text(timeout=timeout):
                         raise AssertionError(f"Expected text not present: {act['contains']}")
-                elif not act.get('url'):
-                    page.wait_for_timeout(min(timeout, 2000))
+                elif 'contains' in act:
+                    # Assertion against the whole page, so `{"action":"assert","contains":"¥"}`
+                    # works without naming an element first.
+                    body = page.inner_text('body', timeout=timeout)
+                    if act['contains'] not in body:
+                        raise AssertionError(f"Expected text not present on page: {act['contains']}")
+                elif action == 'wait' and not act.get('url'):
+                    page.wait_for_timeout(wait_millis(act))
             if action in ('goto', 'click', 'click_xy', 'press', 'back', 'forward', 'reload', 'scroll'):
                 settle(page)
                 popups = [p for p in page.context.pages if p not in before_pages and not p.is_closed()]
@@ -261,6 +410,12 @@ def perform_actions(page, actions, screenshot_path=None):
                     page = popups[-1]
                     settle(page)
                     step['opened_tab'] = True
+                # Only a page that actually navigated needs the extra settle; a
+                # same-page click or a scroll leaves the rendered text in place.
+                navigated = action in ('goto', 'back', 'forward', 'reload') or (
+                    before_state is not None and before_state[0] != page.url)
+                if navigated:
+                    settle_dynamic(page)
             if before_state is not None:
                 after_state = state_fingerprint(page)
                 if after_state is not None and after_state == before_state:

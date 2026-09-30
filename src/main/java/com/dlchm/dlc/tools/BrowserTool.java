@@ -34,6 +34,9 @@ public class BrowserTool {
     private static final int TIMEOUT_SECONDS = 120;
     private static final int CDP_PORT = 9222;
     private static final String CDP_URL = "http://127.0.0.1:" + CDP_PORT;
+    /** Last known tab URLs, replayed on the next launch so a restart is not a blank slate. */
+    private static final String TABS_FILE = "last-tabs.txt";
+    private static final int MAX_RESTORED_TABS = 8;
     private static final boolean IS_WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
     private static final String PYTHON_CMD = IS_WINDOWS ? "python" : "python3";
 
@@ -66,9 +69,16 @@ public class BrowserTool {
 
     @Tool(name = "browser_start", description = "Start a Chrome browser with remote debugging enabled, "
             + "or connect to an existing one. The browser window is VISIBLE so the user can see and interact with it "
-            + "(e.g., solve CAPTCHAs, complete 2FA). Returns the list of open tabs. "
+            + "(e.g., solve CAPTCHAs, complete 2FA). Returns the list of open tabs, and reopens the tabs "
+            + "from the previous session so page context survives a restart. "
+            + "Set force=true ONLY when browser_action/browser_view report the browser is unresponsive "
+            + "(CDP connect timeouts): it restarts the DLC-managed Chrome and reopens the current tabs, "
+            + "and never touches the user's own Chrome windows. "
             + "MUST call this before browser_view or browser_action.")
-    public synchronized String browserStart() {
+    public synchronized String browserStart(
+            @ToolParam(required = false, description = "Restart the DLC-managed Chrome when it is unresponsive "
+                    + "(CDP connect timeouts). Only affects the browser DLC launched, never the user's own Chrome. "
+                    + "Default false.") Boolean force) {
         try {
             Files.createDirectories(runtime);
             // Serialize startup across DLC instances, in addition to method synchronization.
@@ -79,8 +89,15 @@ public class BrowserTool {
                 catch (java.nio.channels.OverlappingFileLockException e) { lock = null; }
                 if (lock == null) return "Error: Another DLC instance is starting Chrome. Wait and observe again.";
                 try (FileLock acquired = lock) {
+                    if (Boolean.TRUE.equals(force)) {
+                        String problem = restartManagedChrome();
+                        if (problem != null) return problem;
+                    }
                     String tabs = listTabsViaCdp();
-                    if (tabs != null) return "Chrome is already running.\n" + tabs;
+                    if (tabs != null) {
+                        rememberTabs();
+                        return "Chrome is already running.\n" + tabs;
+                    }
                     if (cdpProblem != null && !managedEndpoint) return "Error: " + cdpProblem;
                     if ((ownedChrome != null && ownedChrome.isAlive()) || BrowserCacheCleaner.inUse(profile)) {
                         return "Error: DLC Chrome is running but CDP is unavailable. Do not launch another browser or delete profile locks.";
@@ -94,18 +111,25 @@ public class BrowserTool {
                     Path tmp = runtime.resolve("tmp");
                     Files.createDirectories(tmp);
                     Path startupLog = runtime.resolve("chrome-startup.log");
-                    List<String> cmd = List.of(executable,
+                    List<String> cmd = new ArrayList<>(List.of(executable,
                             "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=" + (managedEndpoint ? 0 : CDP_PORT),
                             "--user-data-dir=" + profile,
                             "--disk-cache-size=67108864", "--media-cache-size=33554432",
-                            "--no-first-run", "--no-default-browser-check", "about:blank");
+                            "--no-first-run", "--no-default-browser-check"));
+                    // Reopen where the last session left off instead of dumping the
+                    // agent back on about:blank with no page context.
+                    List<String> reopened = rememberedTabs();
+                    cmd.addAll(reopened.isEmpty() ? List.of("about:blank") : reopened);
                     ProcessBuilder pb = new ProcessBuilder(cmd).redirectErrorStream(true)
                             .redirectOutput(startupLog.toFile());
                     setTemporaryEnvironment(pb, tmp);
                     ownedChrome = pb.start();
                     for (int i = 0; i < 30; i++) {
                         tabs = listTabsViaCdp();
-                        if (tabs != null) return "Chrome started successfully.\n" + tabs;
+                        if (tabs != null) {
+                            rememberTabs();
+                            return "Chrome started successfully.\n" + tabs;
+                        }
                         if (!ownedChrome.isAlive()) break;
                         Thread.sleep(250);
                     }
@@ -130,6 +154,52 @@ public class BrowserTool {
         }
     }
 
+    /** No-argument form for callers that only need a connection. */
+    String browserStart() {
+        return browserStart(Boolean.FALSE);
+    }
+
+    /**
+     * Kill and wait out the DLC-managed Chrome so a wedged session can be rebuilt.
+     *
+     * <p>Matched by this tool's own profile path, which appears in the command line
+     * of the process DLC launched — so the user's other Chrome windows are never
+     * touched. Returns an error string when restarting is not ours to do, or
+     * {@code null} when the endpoint is gone and a fresh launch can proceed.</p>
+     */
+    private String restartManagedChrome() {
+        if (!managedEndpoint) {
+            return "Error: Cannot restart a browser DLC did not launch. "
+                    + "Close the stuck window manually, then call browser_start.";
+        }
+        try {
+            if (IS_WINDOWS) {
+                ProcessIsolation.destroyTree(ownedChrome);
+            } else {
+                Process killed = new ProcessBuilder("pkill", "-f", profile.toString())
+                        .redirectErrorStream(true).start();
+                killed.waitFor(5, TimeUnit.SECONDS);
+            }
+        } catch (Exception ignored) {
+            // Fall through: the wait loop below still gives an in-flight exit a chance.
+        } finally {
+            ownedChrome = null;
+        }
+        for (int i = 0; i < 25; i++) {
+            if (listTabsViaCdp() == null) {
+                if (profile.equals(BrowserCacheCleaner.PROFILE)) BrowserCacheCleaner.prune();
+                return null;
+            }
+            try {
+                Thread.sleep(200);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return "Error: Browser restart interrupted.";
+            }
+        }
+        return "Error: The previous Chrome did not exit; close it manually and call browser_start again.";
+    }
+
     @Tool(name = "browser_view", description = "Analyze the current page in the browser. "
             + "Returns success, title, URL, tab, viewport, screenshot, actionable element refs, "
             + "headings, iframe selectors and main text content. "
@@ -138,8 +208,8 @@ public class BrowserTool {
             @ToolParam(required = false, description = "Tab index to view (default: 0 = first tab)") Integer tab,
             @ToolParam(required = false, description = "Optional path to save screenshot, e.g. /tmp/page.png") String screenshot) {
 
-        if (listTabsViaCdp() == null) return "Error: " + (cdpProblem != null ? cdpProblem
-                : "Chrome is not connected. Call browser_start once before operating.");
+        String notConnected = connectIfNeeded();
+        if (notConnected != null) return notConnected;
         if (!Files.exists(script)) {
             return "Error: browser_cdp.py not found. Restart DLC to extract built-in scripts.";
         }
@@ -186,8 +256,8 @@ public class BrowserTool {
             @ToolParam(required = false, description = "Tab index (default: 0)") Integer tab,
             @ToolParam(required = false, description = "Optional path to save final screenshot") String screenshot) {
 
-        if (listTabsViaCdp() == null) return "Error: " + (cdpProblem != null ? cdpProblem
-                : "Chrome is not connected. Call browser_start once before operating.");
+        String notConnected = connectIfNeeded();
+        if (notConnected != null) return notConnected;
         if (!Files.exists(script)) {
             return "Error: browser_cdp.py not found. Restart DLC to extract built-in scripts.";
         }
@@ -251,6 +321,91 @@ public class BrowserTool {
         } catch (Exception e) {
             cdpProblem = "CDP endpoint is invalid or unavailable: " + e.getMessage();
             return null;
+        }
+    }
+
+    /**
+     * Make sure a browser is reachable before a view/action call runs.
+     *
+     * <p>A turn often opens with browser_action and only then learns Chrome is not
+     * connected, spending a round trip on an error the tool could have handled. The
+     * user asked for the browser in the first place, so connecting on demand is
+     * expected behaviour rather than a surprise — but only DLC's own Chrome is ever
+     * launched; an attached external endpoint is never started behind the user's
+     * back. Returns {@code null} when connected, otherwise the error to surface.</p>
+     */
+    private String connectIfNeeded() {
+        if (listTabsViaCdp() != null) return null;
+        if (managedEndpoint) {
+            String started = browserStart(Boolean.FALSE);
+            if (listTabsViaCdp() != null) return null;
+            if (started.startsWith("Error")) return started;
+        }
+        return "Error: " + (cdpProblem != null ? cdpProblem
+                : "Chrome is not connected. Call browser_start once before operating.");
+    }
+
+    /**
+     * Snapshot the live http(s) tabs so the next launch can reopen them. A failed
+     * CDP read leaves the previous snapshot untouched — that file is the only
+     * record of where the user was, and a dead endpoint is not evidence of a blank
+     * session.
+     */
+    private void rememberTabs() {
+        List<String> urls = openTabUrls();
+        if (urls == null) return;
+        try {
+            Path file = runtime.resolve(TABS_FILE);
+            if (urls.isEmpty()) {
+                Files.deleteIfExists(file);
+                return;
+            }
+            Files.createDirectories(runtime);
+            Files.write(file, urls, StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+            // Tab restoration is a convenience; never fail a browser call over it.
+        }
+    }
+
+    /** Live http(s) tab URLs, or {@code null} when CDP cannot be read. */
+    private List<String> openTabUrls() {
+        com.fasterxml.jackson.databind.JsonNode targets;
+        try {
+            targets = readCdpJson("/json/list");
+        } catch (Exception e) {
+            return null;
+        }
+        if (targets == null || !targets.isArray()) return null;
+        List<String> urls = new ArrayList<>();
+        for (var target : targets) {
+            if (!"page".equals(target.path("type").asText())) continue;
+            String url = target.path("url").asText("");
+            if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
+            // A blank title means the page never rendered: a DNS error, an HTTP error
+            // page, or a navigation still stuck. Replaying that next session hands the
+            // agent a zombie tab (one run reopened a dead search URL, then browser_view
+            // showed about:blank while the tab list still advertised the old address).
+            // Only pages that actually loaded are worth remembering.
+            if (target.path("title").asText("").isBlank()) continue;
+            urls.add(url);
+        }
+        return urls;
+    }
+
+    List<String> rememberedTabs() {
+        try {
+            Path file = runtime.resolve(TABS_FILE);
+            if (!Files.isRegularFile(file) || Files.size(file) > 8_192) return List.of();
+            List<String> urls = new ArrayList<>();
+            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                String url = line.trim();
+                if (!url.startsWith("http://") && !url.startsWith("https://")) continue;
+                urls.add(url);
+                if (urls.size() >= MAX_RESTORED_TABS) break;
+            }
+            return urls;
+        } catch (Exception e) {
+            return List.of();
         }
     }
 
@@ -380,6 +535,15 @@ public class BrowserTool {
                 if (result.contains("connect") && result.contains("refused")) {
                     return "Error: Cannot connect to Chrome. Call browser_start first.";
                 }
+                if (result.contains("connect_over_cdp") && result.toLowerCase().contains("timeout")) {
+                    // A wedged renderer (typically an unfinished navigation to an
+                    // unreachable host) blocks the whole CDP session while the HTTP
+                    // endpoints keep answering. The model must rebuild the browser,
+                    // and saying so beats letting it retry a doomed call.
+                    return "Error: 浏览器 CDP 无响应（页面可能卡死）。请调用 browser_start 并传 force=true "
+                            + "重启 DLC 管理的浏览器，然后重新观察页面；不要重复原调用。原始错误: "
+                            + result.substring(0, Math.min(300, result.length()));
+                }
                 // Structured Python failures retain the screenshot and actual page state.
                 if (result.stripLeading().startsWith("{")) return result;
                 return "Error (exit " + process.exitValue() + "): " + result;
@@ -411,6 +575,7 @@ public class BrowserTool {
 
     @PreDestroy
     public synchronized void closeOwnedBrowser() {
+        rememberTabs();
         ProcessIsolation.destroyTree(ownedChrome);
         ownedChrome = null;
         if (profile.equals(BrowserCacheCleaner.PROFILE)) BrowserCacheCleaner.prune();

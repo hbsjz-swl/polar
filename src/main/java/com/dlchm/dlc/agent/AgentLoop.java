@@ -16,6 +16,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -55,8 +56,23 @@ public final class AgentLoop {
     private static final int MAX_HISTORY_RESULT_CHARS = 800;
     private static final int MAX_IMAGE_BYTES = 5 * 1024 * 1024;
     private static final int MAX_TEXT_REPLAY_CHARS = 48_000;
-    /** How many times one turn may be re-driven after the model stops mid-task. */
+    /** How many times one turn may be re-driven after the model stops mid-task to ask. */
     private static final int MAX_AUTO_CONTINUE = 2;
+    /**
+     * How many times one turn may be re-driven by the evidence/site gates. Kept
+     * separate from {@link #MAX_AUTO_CONTINUE} on purpose: a gate redrive and a
+     * stop-and-ask redrive are different failures, and sharing one counter let a
+     * single mislabelled number burn the budget that the "don't stop to ask" guard
+     * needs — so the turn ended still asking "要不要我继续".
+     */
+    private static final int MAX_GATE_REDRIVE = 2;
+    /**
+     * How many consecutive tool calls may observe the same page before the turn is
+     * told it is stalled. One run spent 27 calls clicking coordinates on a single
+     * search form — every individual click "succeeded", so a per-call failure
+     * counter never fired and only the unchanged page URL revealed the deadlock.
+     */
+    private static final int STALL_STREAK_LIMIT = 6;
     /** Read-only tools stay available once the retry budget is spent. */
     private static final Set<String> READ_ONLY_TOOLS = Set.of(
             "browser_view", "read_file", "glob_search", "grep_search", "list_skills", "memory_read");
@@ -152,6 +168,10 @@ public final class AgentLoop {
         boolean textReplayRequired = false;
         boolean toolExecuted = false;
         int autoContinue = 0;
+        int gateRedrive = 0;
+        String stalledUrl = null;
+        int sameUrlStreak = 0;
+        Set<String> stallAdvised = new HashSet<>();
         ToolFailureGuard failureGuard = new ToolFailureGuard();
         for (int step = 0; step < MAX_ITERATIONS; step++) {
             if (sink.isCancelled()) return;
@@ -199,11 +219,13 @@ public final class AgentLoop {
                 messages.add(answer);
                 persist(session, messages);
                 if (usage.hasData()) sink.next(new StreamEvent(StreamEvent.Type.USAGE, usage.toString()));
-                String redrive = redriveReason(text, taskState, failureGuard, toolExecuted, autoContinue);
+                Redrive redrive = redriveReason(text, taskState, failureGuard, toolExecuted,
+                        autoContinue, gateRedrive, messages);
                 if (redrive == null) return;
-                autoContinue++;
+                if (redrive.kind() == RedriveKind.GATE) gateRedrive++;
+                else autoContinue++;
                 sink.next(new StreamEvent(StreamEvent.Type.TOKEN, "\n[继续推进]\n"));
-                messages.add(new UserMessage(redrive));
+                messages.add(new UserMessage(redrive.message()));
                 persist(session, messages);
                 continue;
             }
@@ -211,9 +233,27 @@ public final class AgentLoop {
             // Keep the exact assistant message so Spring AI can serialize its
             // assistant tool_calls for the next Chat Completions request.
             messages.add(answer);
+            String narrated = AnswerGate.violation(taskState, text);
+            if (narrated != null) {
+                // Progress narration is still an assertion the user reads. Checking
+                // only the final answer leaves the whole middle of a turn unguarded.
+                // Deduped like the site hint: a repeated claim must not stack
+                // identical corrections on every iteration.
+                String hint = unsourcedHint(narrated);
+                if (!alreadyAdvised(messages, hint)) messages.add(new UserMessage(hint));
+            }
+            String wrongSite = SiteGate.violation(taskState.lastObservedHost(), text);
+            if (wrongSite != null) {
+                // Describing a page that is not open is the upstream cause of the
+                // guessed selectors that follow: the model acts on a screen it is
+                // not actually looking at. Advise once per claim, not once per turn.
+                String hint = siteHint(wrongSite, taskState.lastObservedHost());
+                if (!alreadyAdvised(messages, hint)) messages.add(new UserMessage(hint));
+            }
             List<ToolResponseMessage.ToolResponse> results = new ArrayList<>();
             List<String> failedTools = new ArrayList<>();
             boolean repeatedFailure = false;
+            boolean locatorMiss = false;
             String lastScreenshot = null;
             for (AssistantMessage.ToolCall call : answer.getToolCalls()) {
                 String name = call.name() == null ? "unknown" : call.name();
@@ -242,6 +282,16 @@ public final class AgentLoop {
                 }
                 result = decodeToolResult(result);
                 taskState.recordToolResult(name, result);
+                // Stall detection: the model is stuck in place when the observed page
+                // URL never changes while it keeps clicking/typing. Counting the page
+                // (not the action) is what catches it — each click reports success.
+                String observedUrl = taskState.lastObservedUrl();
+                if (!observedUrl.isBlank() && observedUrl.equals(stalledUrl)) {
+                    sameUrlStreak++;
+                } else {
+                    stalledUrl = observedUrl;
+                    sameUrlStreak = 1;
+                }
                 boolean failed = ToolResultStatus.failed(result);
                 failureGuard.record(name, call.arguments(), result);
                 result = limitToolResult(result, MAX_TOOL_RESULT_CHARS);
@@ -255,19 +305,41 @@ public final class AgentLoop {
                 if (match.find()) lastScreenshot = match.group(1).trim();
                 if (failed) {
                     repeatedFailure |= blocked != null;
+                    locatorMiss |= ToolFailureGuard.locatorMiss(result);
                     failedTools.add(name + ": " + limit(result, 500));
                 }
             }
             messages.add(ToolResponseMessage.builder().responses(results).build());
             toolExecuted = true;
-            if (!failedTools.isEmpty()) {
-                String hint = repeatedFailure
-                        ? "[系统提示] 同一工具和参数已重复失败。禁止原样重试，也禁止就此结束回合输出分析或等待确认；必须改用明显不同的策略（换定位方式、换URL、换入口页）继续推进任务。"
-                        : "[系统提示] 上轮工具失败。分析路径、参数、权限和环境后，立即采取不同步骤继续执行，不要原样重试，也不要停下等待用户确认。";
-                messages.add(new UserMessage(hint + "\n" + String.join("\n", failedTools)));
+            String escalation = failureGuard.escalateHint();
+            if (!failedTools.isEmpty() || escalation != null) {
+                StringBuilder hint = new StringBuilder();
+                if (locatorMiss) {
+                    // A guessed selector that never resolves is not a tuning problem,
+                    // so the generic "try a different step" advice does not help here.
+                    hint.append("[系统提示] 定位失败说明这个选择器在页面上不存在或不可见。"
+                                    + "下一步必须先调用 browser_view，从返回的 final.interactive_elements 里挑一个 ref（形如 e5），"
+                                    + "再用这个 ref 操作；禁止再凭猜测写新的 CSS selector。\n");
+                }
+                if (!failedTools.isEmpty()) {
+                    hint.append(repeatedFailure
+                            ? "[系统提示] 同一工具和参数已重复失败。禁止原样重试，也禁止就此结束回合输出分析或等待确认；必须改用明显不同的策略（换定位方式、换URL、换入口页）继续推进任务。"
+                            : "[系统提示] 上轮工具失败。分析路径、参数、权限和环境后，立即采取不同步骤继续执行，不要原样重试，也不要停下等待用户确认。");
+                    hint.append('\n').append(String.join("\n", failedTools));
+                }
+                if (escalation != null) hint.append('\n').append(escalation);
+                messages.add(new UserMessage(hint.toString()));
             }
-            if (failureGuard.exhausted()) {
-                messages.add(new UserMessage("[系统提示] 本轮已触发失败重试上限，写入/操作类工具已禁用，只保留只读观察工具（browser_view / read_file / grep_search）。根据真实执行记录说明已完成内容、已尝试的替代方案和阻塞原因，不能声称失败动作已完成。"));
+            if (stalledUrl != null && !stalledUrl.isBlank() && sameUrlStreak >= STALL_STREAK_LIMIT
+                    && stallAdvised.add(stalledUrl)) {
+                // Fires once per page: the point is to break the loop, not to nag on
+                // every following call while the model finishes reading that page.
+                messages.add(new UserMessage("[系统提示] 你已经停留在同一个页面（" + limit(stalledUrl, 160)
+                        + "）连续 " + sameUrlStreak + " 次工具调用而没有前进。"
+                        + "不要再靠坐标点击或反复输入在表单里试探。若只需要城市/站点代码，"
+                        + "从城市下拉候选里读出代码后立刻改用结果页直达 URL；"
+                        + "若输入框已被搞成拼接脏值，放弃它，重新打开入口页或直接访问结果页。"
+                        + "只有确实在同一长页面内连续读取（多次 get_text/scroll）时才可忽略本条。"));
             }
             if (properties.isVisionEnabled() && lastScreenshot != null) {
                 // Keep only the newest screenshot in live replay; old images do not
@@ -497,21 +569,76 @@ public final class AgentLoop {
      *
      * @return the follow-up user message, or {@code null} to finish the turn.
      */
-    private String redriveReason(String text, TaskState taskState, ToolFailureGuard failureGuard,
-                                 boolean toolExecuted, int autoContinue) {
-        if (autoContinue >= MAX_AUTO_CONTINUE || failureGuard.exhausted()) return null;
+    private Redrive redriveReason(String text, TaskState taskState, ToolFailureGuard failureGuard,
+                                  boolean toolExecuted, int autoContinue, int gateRedrive,
+                                  List<Message> messages) {
+        // The evidence check runs even after the tool budget is spent: a burned-out
+        // turn is exactly when a fabricated number is most likely to appear, and
+        // skipping the gate there would let the worst case through unchecked.
         String unsourced = AnswerGate.violation(taskState, text);
-        if (unsourced != null) {
-            return "[系统提示] 你的回答里出现了工具从未返回过的金额「" + unsourced + "」，这属于编造数据。"
-                    + "立即用工具实际查询该数值；确实无法取得时，必须明确写“未获得实时数据”，"
-                    + "不得以具体金额呈现。若该数字是合计或推算，请逐项列出每一段的来源数值。";
+        if (unsourced != null && gateRedrive < MAX_GATE_REDRIVE) {
+            return new Redrive(RedriveKind.GATE, unsourcedHint(unsourced));
         }
-        if (toolExecuted && ASK_TO_CONTINUE.matcher(text).find() && NEXT_STEP.matcher(text).find()) {
-            return "[系统提示] 目标尚未完成，不要停下来征求同意。你刚刚承诺的“下一步”要立刻执行。"
-                    + "只有缺少凭据（登录/验证码/2FA）、触发审批、或存在真正二义性时才允许停下。"
-                    + "现在直接调用工具推进，直到目标达成后再给出完整汇总。";
+        if (failureGuard.exhausted()) return null;
+        String wrongSite = SiteGate.violation(taskState.lastObservedHost(), text);
+        if (wrongSite != null && gateRedrive < MAX_GATE_REDRIVE) {
+            String hint = siteHint(wrongSite, taskState.lastObservedHost());
+            if (!alreadyAdvised(messages, hint)) return new Redrive(RedriveKind.GATE, hint);
+        }
+        // Uses its own budget: an earlier gate redrive must not consume the slot
+        // that stops the model from ending the turn with "要不要我继续".
+        // Only a turn that has not yet delivered anything can be "stalling": once
+        // the answer quotes observed values, a closing "want me to also do X?" is
+        // an offer. Re-driving it promotes that offer into mandatory extra work the
+        // user never asked for — which is exactly how one run spent ten calls
+        // chasing a rail-fare lookup nobody requested.
+        if (toolExecuted && autoContinue < MAX_AUTO_CONTINUE
+                && AnswerGate.citedEvidenceCount(taskState, text) < 2
+                && ASK_TO_CONTINUE.matcher(text).find() && NEXT_STEP.matcher(text).find()) {
+            return new Redrive(RedriveKind.ASK,
+                    "[系统提示] 不要停下来征求同意。若用户要求的目标还没完成，立刻调用工具把剩下的做完，"
+                            + "直到给出完整汇总；只有缺少凭据（登录/验证码/2FA）、触发审批、或存在真正二义性时才允许停下。"
+                            + "若目标其实已经完成，就直接结束本次回复：既不要重复已经给过的内容，"
+                            + "也不要把你自己临时提出的额外可选项（例如用户没有要求补查的数据）当成新任务去做。");
         }
         return null;
+    }
+
+    /** Which budget a re-drive spends; see the two MAX_* constants. */
+    private enum RedriveKind { GATE, ASK }
+
+    private record Redrive(RedriveKind kind, String message) { }
+
+    /**
+     * Correction for an answer or progress narration that asserts a number no tool
+     * returned. Shared by the mid-turn check and the end-of-turn redrive so both
+     * give the same, actionable instruction — including "do not re-observe the
+     * same page", which previously sent the model into a re-check loop.
+     */
+    private static String unsourcedHint(String token) {
+        return "[系统提示] 你的说明里出现了工具从未返回过的金额「" + token + "」，这属于编造数据。"
+                + "若它是合计或推算，请逐项列出每一段的来源数值（各段必须来自工具已取证的数据）；"
+                + "若不是，则要么真正用工具查到它，要么明确写“未获得实时数据”，不得以具体金额呈现。"
+                + "不要为了这个数字重复观察同一个页面；只有当你确实还没查过该数据源时才发起新查询。";
+    }
+
+    /**
+     * True when this exact guidance is already on the transcript. Keeps a repeated
+     * wrong claim from stacking identical hints every iteration.
+     */
+    private static boolean alreadyAdvised(List<Message> messages, String hint) {
+        for (Message message : messages) {
+            if (message instanceof UserMessage user && hint.equals(user.getText())) return true;
+        }
+        return false;
+    }
+
+    /** Correction for a narration that names a site the browser is not on. */
+    private static String siteHint(String claimed, String actual) {
+        return "[系统提示] 你描述的当前页面与浏览器真实现状不符：你写的是「" + claimed
+                + "」，但最近一次 observation 显示浏览器停在 " + actual + "。"
+                + "不要根据会话历史里出现过的页面推测当前屏幕。立即调用 browser_view，"
+                + "用返回的 url/title 确认当前页面后再决定操作；在确认之前不要写出站点名称。";
     }
 
     /** Observation-only subset kept alive after the retry budget is spent. */
