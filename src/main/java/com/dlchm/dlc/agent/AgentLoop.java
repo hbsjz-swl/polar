@@ -4,6 +4,7 @@ import com.dlchm.dlc.config.DlcProperties;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.session.MarkdownSessionStore;
+import com.dlchm.dlc.session.TaskState;
 import com.dlchm.dlc.tools.ApprovalRequiredException;
 import com.dlchm.dlc.tools.MemoryTool;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -53,6 +55,18 @@ public final class AgentLoop {
     private static final int MAX_HISTORY_RESULT_CHARS = 800;
     private static final int MAX_IMAGE_BYTES = 5 * 1024 * 1024;
     private static final int MAX_TEXT_REPLAY_CHARS = 48_000;
+    /** How many times one turn may be re-driven after the model stops mid-task. */
+    private static final int MAX_AUTO_CONTINUE = 2;
+    /** Read-only tools stay available once the retry budget is spent. */
+    private static final Set<String> READ_ONLY_TOOLS = Set.of(
+            "browser_view", "read_file", "glob_search", "grep_search", "list_skills", "memory_read");
+    /** "如果你同意 / 需要我 / 你回我一句" — asking permission instead of finishing. */
+    private static final Pattern ASK_TO_CONTINUE = Pattern.compile(
+            "(?:如果|要是|若)?\\s*你\\s*(?:同意|愿意|需要|确认|回|说|点)"
+                    + "|要不要我|需要我|是否(?:需要)?我|等我|待你|请你?(?:确认|回复)|按这条继续");
+    /** …paired with a promise to do the work "next". */
+    private static final Pattern NEXT_STEP = Pattern.compile(
+            "下一条|下一步|接下来|接着|继续(?:执行|查|做|推进|完成|搜索|操作|对比|帮你)|我就|便会|即可继续");
 
     private final ContextCompressor compressor;
     private final ToolCallbackProvider toolProvider;
@@ -114,11 +128,17 @@ public final class AgentLoop {
         ToolCallback[] callbacks = toolProvider.getToolCallbacks();
         Map<String, ToolCallback> tools = new HashMap<>();
         for (ToolCallback callback : callbacks) tools.put(callback.getToolDefinition().name(), callback);
+        TaskState taskState = session.getTaskState();
+        taskState.observeUserMessage(input);
+        // Render the cross-turn state into messages[0] on every request. The
+        // compressor only rewrites messages[1..], so the goal, the user's
+        // constraints and the observed facts can never be summarised away.
         String system = systemTemplate
                 .replace("{current_time}", ZonedDateTime.now().format(TIME_FMT))
                 .replace("{working_dir}", paths.getWorkspaceRoot().toString())
                 .replace("{agent_md}", agentMd == null ? "" : "\n\n## Project Rules\n" + agentMd)
-                .replace("{memory}", limit(memory.loadAllMemory(), 12_000));
+                .replace("{memory}", limit(memory.loadAllMemory(), 12_000))
+                + taskState.render();
         List<Message> messages = new ArrayList<>();
         messages.add(new SystemMessage(system));
         messages.addAll(session.getHistory());
@@ -130,6 +150,8 @@ public final class AgentLoop {
 
         TokenUsage usage = new TokenUsage();
         boolean textReplayRequired = false;
+        boolean toolExecuted = false;
+        int autoContinue = 0;
         ToolFailureGuard failureGuard = new ToolFailureGuard();
         for (int step = 0; step < MAX_ITERATIONS; step++) {
             if (sink.isCancelled()) return;
@@ -138,9 +160,13 @@ public final class AgentLoop {
                     properties.getContextWindowTokens(), model)) {
                 sink.next(new StreamEvent(StreamEvent.Type.TOKEN, "[上下文已压缩]\n"));
             }
-            boolean toolsDisabled = failureGuard.exhausted();
+            // A spent budget disables the failing tools, not the ability to look at
+            // reality: read-only observation stays available so the model can still
+            // report the true state instead of guessing.
+            ToolCallback[] active = failureGuard.exhausted()
+                    ? readOnlySubset(callbacks, failureGuard) : callbacks;
             var options = model.getOptions().mutate()
-                    .toolCallbacks(toolsDisabled ? List.of() : List.of(callbacks)).build();
+                    .toolCallbacks(List.of(active)).build();
             Prompt prompt = new Prompt(textReplayRequired
                     ? textReplay(messages) : List.copyOf(messages), options);
             ChatResponse response;
@@ -173,7 +199,13 @@ public final class AgentLoop {
                 messages.add(answer);
                 persist(session, messages);
                 if (usage.hasData()) sink.next(new StreamEvent(StreamEvent.Type.USAGE, usage.toString()));
-                return;
+                String redrive = redriveReason(text, taskState, failureGuard, toolExecuted, autoContinue);
+                if (redrive == null) return;
+                autoContinue++;
+                sink.next(new StreamEvent(StreamEvent.Type.TOKEN, "\n[继续推进]\n"));
+                messages.add(new UserMessage(redrive));
+                persist(session, messages);
+                continue;
             }
 
             // Keep the exact assistant message so Spring AI can serialize its
@@ -209,6 +241,7 @@ public final class AgentLoop {
                     }
                 }
                 result = decodeToolResult(result);
+                taskState.recordToolResult(name, result);
                 boolean failed = ToolResultStatus.failed(result);
                 failureGuard.record(name, call.arguments(), result);
                 result = limitToolResult(result, MAX_TOOL_RESULT_CHARS);
@@ -226,14 +259,15 @@ public final class AgentLoop {
                 }
             }
             messages.add(ToolResponseMessage.builder().responses(results).build());
+            toolExecuted = true;
             if (!failedTools.isEmpty()) {
                 String hint = repeatedFailure
-                        ? "[系统提示] 同一工具和参数已重复失败。停止原样重试，说明卡点或采取不同步骤。"
-                        : "[系统提示] 上轮工具失败。分析路径、参数、权限和环境后再决定下一步，避免原样重试。";
+                        ? "[系统提示] 同一工具和参数已重复失败。禁止原样重试，也禁止就此结束回合输出分析或等待确认；必须改用明显不同的策略（换定位方式、换URL、换入口页）继续推进任务。"
+                        : "[系统提示] 上轮工具失败。分析路径、参数、权限和环境后，立即采取不同步骤继续执行，不要原样重试，也不要停下等待用户确认。";
                 messages.add(new UserMessage(hint + "\n" + String.join("\n", failedTools)));
             }
             if (failureGuard.exhausted()) {
-                messages.add(new UserMessage("[系统提示] 本轮已触发失败重试上限。工具已禁用。根据真实执行记录说明已完成内容和阻塞原因，不能声称失败动作已完成。"));
+                messages.add(new UserMessage("[系统提示] 本轮已触发失败重试上限，写入/操作类工具已禁用，只保留只读观察工具（browser_view / read_file / grep_search）。根据真实执行记录说明已完成内容、已尝试的替代方案和阻塞原因，不能声称失败动作已完成。"));
             }
             if (properties.isVisionEnabled() && lastScreenshot != null) {
                 // Keep only the newest screenshot in live replay; old images do not
@@ -451,6 +485,45 @@ public final class AgentLoop {
             if (current instanceof ApprovalRequiredException approval) return approval;
         }
         return null;
+    }
+
+    /**
+     * Decide whether a text-only answer should be rejected and the turn re-driven.
+     *
+     * <p>Two structural triggers: an answer that asserts a price the tools never
+     * observed, and an answer that stops mid-task to ask for permission it already
+     * holds. Both are the same failure — the model treating "I produced text" as
+     * "the task is done".</p>
+     *
+     * @return the follow-up user message, or {@code null} to finish the turn.
+     */
+    private String redriveReason(String text, TaskState taskState, ToolFailureGuard failureGuard,
+                                 boolean toolExecuted, int autoContinue) {
+        if (autoContinue >= MAX_AUTO_CONTINUE || failureGuard.exhausted()) return null;
+        String unsourced = AnswerGate.violation(taskState, text);
+        if (unsourced != null) {
+            return "[系统提示] 你的回答里出现了工具从未返回过的金额「" + unsourced + "」，这属于编造数据。"
+                    + "立即用工具实际查询该数值；确实无法取得时，必须明确写“未获得实时数据”，"
+                    + "不得以具体金额呈现。若该数字是合计或推算，请逐项列出每一段的来源数值。";
+        }
+        if (toolExecuted && ASK_TO_CONTINUE.matcher(text).find() && NEXT_STEP.matcher(text).find()) {
+            return "[系统提示] 目标尚未完成，不要停下来征求同意。你刚刚承诺的“下一步”要立刻执行。"
+                    + "只有缺少凭据（登录/验证码/2FA）、触发审批、或存在真正二义性时才允许停下。"
+                    + "现在直接调用工具推进，直到目标达成后再给出完整汇总。";
+        }
+        return null;
+    }
+
+    /** Observation-only subset kept alive after the retry budget is spent. */
+    private static ToolCallback[] readOnlySubset(ToolCallback[] callbacks, ToolFailureGuard guard) {
+        List<ToolCallback> allowed = new ArrayList<>();
+        for (ToolCallback callback : callbacks) {
+            String name = callback.getToolDefinition().name();
+            if (READ_ONLY_TOOLS.contains(name) && guard.blockedReason(name, "{}") == null) {
+                allowed.add(callback);
+            }
+        }
+        return allowed.toArray(ToolCallback[]::new);
     }
 
     private static int value(Integer n) { return n == null ? 0 : n; }

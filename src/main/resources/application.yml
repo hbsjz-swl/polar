@@ -24,9 +24,9 @@ dlc:
   max-completion-tokens: ${DLC_MAX_COMPLETION_TOKENS:8192}
   channels:
     wecom:
-      enabled: ${DLC_WECOM_ENABLED:false}
-      corp-id: ${DLC_WECOM_CORP_ID:aib8eA81uHskeqnaqNE}
-      secret: ${DLC_WECOM_SECRET:JbzFzRJbSsrX6NlRRVbjEztF5k}
+      enabled: ${DLC_WECOM_ENABLED:true}
+      corp-id: ${DLC_WECOM_CORP_ID:aib_2-vuHukctcQnMNolARdJtd1pHvKig0U}
+      secret: ${DLC_WECOM_SECRET:33I7t7nuARdfs9OdfUJexq7f2xWrCvUcLaeQqYqMbrR}
 
 logging:
   level:

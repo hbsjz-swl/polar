@@ -168,6 +168,9 @@ public class BrowserTool {
             + "press, type, scroll, screenshot, get_text, get_attr, evaluate, wait, assert, back, forward, reload. "
             + "Target elements using ref from the latest observation, selector, role/name, label, or text. "
             + "Returns success, failed_step, final page observation and screenshot; stops at the first failed action. "
+            + "A step may also report narrowed=true (selector matched several elements and was narrowed) "
+            + "or no_op=true (URL and page text unchanged, so the click likely did not register - re-observe). "
+            + "For fill/type/select the value may also be passed as \"text\". "
             + "Actions execute in sequence. The browser stays open after actions complete - "
             + "login state, cookies, and page state are PRESERVED for next call.")
     public synchronized String browserAction(

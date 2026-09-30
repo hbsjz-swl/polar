@@ -36,4 +36,16 @@ class ToolFailureGuardTest {
         for (int i = 0; i < 4; i++) guard.record("browser_view", "{}", "{\"success\":true,\"url\":\"about:blank\"}");
         assertTrue(guard.exhausted());
     }
+
+    @Test void blocksOnlyTheFailingFamilyAndKeepsObservationToolsAlive() {
+        ToolFailureGuard guard = new ToolFailureGuard();
+        for (int i = 0; i < 4; i++) {
+            guard.record("browser_action", "attempt " + i, "{\"success\":false,\"error\":\"Timeout 7000ms\"}");
+        }
+        assertNotNull(guard.blockedReason("browser_action", "{}"));
+        assertNull(guard.blockedReason("browser_view", "{}"),
+                "observation must survive a sibling tool's meltdown");
+        assertNull(guard.blockedReason("read_file", "{}"));
+        assertNotNull(guard.blockedReason("bash_execute", "ls"));
+    }
 }

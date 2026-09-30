@@ -37,6 +37,7 @@ public class SessionManager {
         Session session = sessions.computeIfAbsent(sessionId, k -> {
             Session loaded = new Session(sessionId, channelType, userId);
             loaded.replaceHistory(store.load(sessionId));
+            loaded.getTaskState().copyFrom(store.loadTaskState(sessionId));
             return loaded;
         });
         session.touch();
@@ -92,6 +93,7 @@ public class SessionManager {
         Session source = getOrCreate(sourceId, channelType, userId);
         Session copy = create(channelType, userId);
         copy.replaceHistory(source.getHistory());
+        copy.getTaskState().copyFrom(source.getTaskState());
         store.save(copy);
         return copy;
     }

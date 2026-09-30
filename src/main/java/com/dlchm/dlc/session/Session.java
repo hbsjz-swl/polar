@@ -22,6 +22,7 @@ public class Session {
     private final String channelType;
     private final String userId;
     private final List<Message> history = new ArrayList<>();
+    private final TaskState taskState = new TaskState();
     private final Instant createdAt;
     private volatile Instant lastActiveAt;
 
@@ -46,6 +47,14 @@ public class Session {
 
     public synchronized List<Message> getHistory() {
         return new ArrayList<>(history);
+    }
+
+    /**
+     * Cross-turn task memory. Kept outside the transcript so history compaction
+     * cannot drop the goal, the user's constraints or the observed facts.
+     */
+    public TaskState getTaskState() {
+        return taskState;
     }
 
     public synchronized void replaceHistory(List<Message> messages) {
@@ -82,6 +91,7 @@ public class Session {
 
     public synchronized void clearHistory() {
         history.clear();
+        taskState.reset();
         touch();
     }
 }

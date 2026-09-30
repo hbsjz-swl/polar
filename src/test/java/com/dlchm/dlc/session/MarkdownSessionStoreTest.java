@@ -49,4 +49,24 @@ class MarkdownSessionStoreTest {
         assertTrue(markdown.contains("api-key=[REDACTED]"));
         assertTrue(!markdown.contains("super-secret-token"));
     }
+
+    @Test
+    void persistsCrossTurnTaskStateAlongsideTheTranscript() {
+        MarkdownSessionStore store = new MarkdownSessionStore(temp.resolve("sessions"), new ObjectMapper());
+        Session session = new Session("task-state", "test", "local");
+        session.getTaskState().observeUserMessage("用工具查实时价格，不要自己猜价格");
+        session.getTaskState().recordToolResult("browser_view", "¥600");
+        store.save(session);
+
+        TaskState restored = store.loadTaskState("task-state");
+
+        assertTrue(restored.strictFacts());
+        assertTrue(restored.hasFact("600"));
+    }
+
+    @Test
+    void missingTaskStateYieldsAnEmptyState() {
+        MarkdownSessionStore store = new MarkdownSessionStore(temp.resolve("sessions"), new ObjectMapper());
+        assertEquals("", store.loadTaskState("never-written").render());
+    }
 }

@@ -80,35 +80,81 @@ def view_page(page, screenshot_path=None):
     return info
 
 
+# Keys that identify an element rather than carry a value.
+TARGET_KEYS = ('selector', 'ref', 'role', 'label')
+
+
 def has_target(act):
     return any(act.get(k) for k in ('selector', 'ref', 'role', 'label', 'text'))
 
 
-def locator_for(page, act):
+def normalize_action(act):
+    """Accept `text` as a value alias when the element is targeted another way.
+
+    A model writing {"action":"type","selector":"#d","text":"2026-10-02"} means the
+    text is the value, not a text= locator. The presence of an explicit target key
+    is what disambiguates the two overloaded meanings of `text`.
+    """
+    if act.get('action') in ('fill', 'type', 'select') and 'value' not in act \
+            and 'text' in act and any(act.get(k) for k in TARGET_KEYS):
+        act = dict(act)
+        act['value'] = act.pop('text')
+    return act
+
+
+def target_candidates(page, act):
+    """Element locators, best first. Later entries exist so that a selector matching
+    several elements degrades into a usable match instead of a strict-mode failure."""
     scope = page.frame_locator(act['frame']) if act.get('frame') else page
     if act.get('ref'):
         ref = act['ref']
         if not isinstance(ref, str) or not ref.startswith('e') or not ref[1:].isdigit():
             raise ValueError('Invalid element ref; observe the page again')
-        return scope.locator(f'[data-dlc-ref="{ref}"]')
+        return [scope.locator(f'[data-dlc-ref="{ref}"]')]
     if act.get('selector'):
-        return scope.locator(act['selector'])
+        selector = act['selector']
+        return [scope.locator(selector), scope.locator(selector + ':visible'),
+                scope.locator(selector).first]
     if act.get('role'):
         kwargs = {'name': act['name'], 'exact': True} if 'name' in act else {}
-        return scope.get_by_role(act['role'], **kwargs)
+        locator = scope.get_by_role(act['role'], **kwargs)
+        return [locator, locator.first]
     if act.get('label'):
-        return scope.get_by_label(act['label'], exact=True)
+        locator = scope.get_by_label(act['label'], exact=True)
+        return [locator, locator.first]
     if act.get('text'):
-        return scope.get_by_text(act['text'], exact=True)
+        locator = scope.get_by_text(act['text'], exact=True)
+        return [locator, locator.first]
     raise ValueError('Missing target: use ref, selector, role/name, label or text')
+
+
+def pick_target(page, act):
+    """Resolve a target as (locator, narrowed). Prefer a unique match; when several
+    elements collide, take the first one and flag that the selector was narrowed."""
+    candidates = target_candidates(page, act)
+    collision = None
+    for index, locator in enumerate(candidates):
+        try:
+            count = locator.count()
+        except Exception:
+            continue
+        if count == 1:
+            return locator, index > 0
+        if count > 1 and collision is None:
+            collision = locator
+    if collision is not None:
+        return collision.first, True
+    return candidates[-1], False
 
 
 def validate_actions(actions):
     if not isinstance(actions, list) or not 1 <= len(actions) <= 20:
         raise ValueError('actions must be an array with 1..20 actions')
-    for act in actions:
+    for index, act in enumerate(actions):
         if not isinstance(act, dict) or act.get('action') not in SUPPORTED:
             raise ValueError(f'Unsupported action: {act}')
+        act = normalize_action(act)
+        actions[index] = act
         action = act['action']
         if action in TARGETED and not has_target(act):
             raise ValueError(f'{action} requires an element target')
@@ -132,6 +178,14 @@ def settle(page):
     page.wait_for_timeout(150)
 
 
+def state_fingerprint(page):
+    """Cheap URL + text-length signature, used to spot a click that did nothing."""
+    try:
+        return (page.url, page.evaluate('() => (document.body ? document.body.innerText.length : 0)'))
+    except Exception:
+        return None
+
+
 def perform_actions(page, actions, screenshot_path=None):
     validate_actions(actions)
     results = []
@@ -142,9 +196,19 @@ def perform_actions(page, actions, screenshot_path=None):
         try:
             timeout = min(15000, max(100, int(act.get('timeout', 7000))))
             before_pages = list(page.context.pages)
-            target = locator_for(page, act) if has_target(act) else None
-            if action in TARGETED | {'press'} and target is not None and target.count() == 1 and not target.is_visible():
-                raise ValueError('Target is hidden. Choose the visible textarea/input/button ref from final.interactive_elements; do not retry this hidden selector.')
+            target = None
+            if has_target(act):
+                target, narrowed = pick_target(page, act)
+                if narrowed:
+                    step['narrowed'] = True
+            if action in TARGETED | {'press'} and target is not None:
+                try:
+                    unique = target.count() == 1
+                except Exception:
+                    unique = False
+                if unique and not target.is_visible():
+                    raise ValueError('Target is hidden. Choose the visible textarea/input/button ref from final.interactive_elements; do not retry this hidden selector.')
+            before_state = state_fingerprint(page) if action in ('click', 'click_xy', 'press') else None
             if action == 'goto':
                 response = page.goto(act['url'], timeout=30000, wait_until='domcontentloaded')
                 if response is not None and response.status >= 400:
@@ -197,6 +261,12 @@ def perform_actions(page, actions, screenshot_path=None):
                     page = popups[-1]
                     settle(page)
                     step['opened_tab'] = True
+            if before_state is not None:
+                after_state = state_fingerprint(page)
+                if after_state is not None and after_state == before_state:
+                    step['no_op'] = True
+                    step['note'] = ('URL and page text did not change after this action, so it probably '
+                                    'did not take effect. Re-observe the page before assuming success.')
             step['url'] = page.url
         except Exception as e:
             step.update(success=False, error=str(e)[:700])
