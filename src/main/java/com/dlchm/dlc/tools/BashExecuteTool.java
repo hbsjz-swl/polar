@@ -54,6 +54,13 @@ public class BashExecuteTool {
         try {
             ProcessBuilder pb = new ProcessBuilder(ProcessIsolation.command(pathResolver.getWorkspaceRoot(), command));
             pb.directory(pathResolver.getWorkspaceRoot().toFile());
+            // Playwright's driver creates temp artifacts before Chrome is launched.
+            // Set all temp variables on the parent process, without changing HOME.
+            java.nio.file.Path tmp = pathResolver.getWorkspaceRoot().resolve(".dlc").resolve("tmp");
+            java.nio.file.Files.createDirectories(tmp);
+            for (String key : java.util.List.of("TMPDIR", "TMP", "TEMP")) {
+                pb.environment().put(key, tmp.toString());
+            }
             pb.redirectErrorStream(true);
             Process process = pb.start();
 

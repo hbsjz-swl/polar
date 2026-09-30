@@ -53,6 +53,28 @@ public class DlcCli {
     private final SubagentManager subagentManager;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private void printToolOutcome(String eventData) {
+        try {
+            JsonNode event = objectMapper.readTree(eventData);
+            String name = event.path("name").asText();
+            String result = event.path("result").asText();
+            boolean failed = com.dlchm.dlc.agent.ToolResultStatus.failed(result);
+            if (!failed && !name.startsWith("browser_")) return;
+            String detail = result;
+            try {
+                JsonNode output = objectMapper.readTree(result);
+                if (failed) detail = output.path("error").asText(output.path("observation_error").asText(result));
+                else {
+                    JsonNode page = output.has("final") ? output.path("final") : output;
+                    detail = page.path("title").asText() + " " + page.path("url").asText();
+                }
+            } catch (Exception ignored) { }
+            if (detail.length() > 500) detail = detail.substring(0, 500) + "…";
+            System.out.println((failed ? ANSI_YELLOW : ANSI_DIM) + "[tool " + name + "] "
+                    + (failed ? "失败: " : "完成: ") + detail + ANSI_RESET);
+        } catch (Exception ignored) { }
+    }
+
     public DlcCli(CodingAgent agent, SandboxPathResolver pathResolver,
                   ToolCallbackProvider toolCallbackProvider, SessionManager sessionManager,
                   com.dlchm.dlc.tools.MemoryTool memoryTool, ApprovalManager approvalManager,
@@ -229,10 +251,10 @@ public class DlcCli {
                                 handleApproval(event.data(), reader);
                             } else if (event.type() == StreamEvent.Type.TOOL_CALL_STARTED) {
                                 System.out.println("\n" + ANSI_DIM + "[tool] " + event.data() + ANSI_RESET);
-                            } else if (event.type() == StreamEvent.Type.TOOL_OUTPUT
-                                    || event.type() == StreamEvent.Type.TOOL_CALL_FINISHED) {
-                                // Tool details are available in the structured event stream;
-                                // keep the interactive transcript readable.
+                            } else if (event.type() == StreamEvent.Type.TOOL_OUTPUT) {
+                                printToolOutcome(event.data());
+                            } else if (event.type() == StreamEvent.Type.TOOL_CALL_FINISHED) {
+                                // Outcome is printed once with the corresponding tool output.
                             } else if (event.type() == StreamEvent.Type.CANCELLED) {
                                 System.out.println("\n" + ANSI_YELLOW + "Turn cancelled." + ANSI_RESET);
                             } else {

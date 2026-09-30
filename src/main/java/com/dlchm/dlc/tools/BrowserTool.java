@@ -4,6 +4,13 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.ConnectException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.nio.file.StandardOpenOption;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.dlchm.dlc.agent.ExecutionContext;
+import com.dlchm.dlc.sandbox.ProcessIsolation;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,98 +33,113 @@ public class BrowserTool {
     private static final Path SCRIPTS_DIR = Path.of(System.getProperty("user.home"), ".dlc", "scripts");
     private static final int TIMEOUT_SECONDS = 120;
     private static final int CDP_PORT = 9222;
-    private static final String CDP_URL = "http://localhost:" + CDP_PORT;
+    private static final String CDP_URL = "http://127.0.0.1:" + CDP_PORT;
     private static final boolean IS_WINDOWS = System.getProperty("os.name", "").toLowerCase().contains("win");
     private static final String PYTHON_CMD = IS_WINDOWS ? "python" : "python3";
 
     private final ToolOutputTruncator truncator;
     private volatile Process ownedChrome;
-    private final List<ProcessHandle> ownedHandles = new ArrayList<>();
+    private String cdpUrl;
+    private final boolean managedEndpoint;
+    private final Path runtime;
+    private final Path profile;
+    private final Path script;
+    private final ObjectMapper mapper = new ObjectMapper();
+    private String cdpProblem;
 
     public BrowserTool(ToolOutputTruncator truncator) {
+        this(truncator, CDP_URL, Path.of(System.getProperty("user.home"), ".dlc", "browser"));
+    }
+
+    BrowserTool(ToolOutputTruncator truncator, String cdpUrl, Path runtime) {
+        this(truncator, cdpUrl, runtime, SCRIPTS_DIR.resolve("browser_cdp.py"));
+    }
+
+    BrowserTool(ToolOutputTruncator truncator, String cdpUrl, Path runtime, Path script) {
         this.truncator = truncator;
+        this.cdpUrl = cdpUrl;
+        this.managedEndpoint = CDP_URL.equals(cdpUrl);
+        this.runtime = runtime;
+        this.profile = runtime.resolve("profile");
+        this.script = script;
     }
 
     @Tool(name = "browser_start", description = "Start a Chrome browser with remote debugging enabled, "
             + "or connect to an existing one. The browser window is VISIBLE so the user can see and interact with it "
             + "(e.g., solve CAPTCHAs, complete 2FA). Returns the list of open tabs. "
             + "MUST call this before browser_view or browser_action.")
-    public String browserStart() {
-        // Check if Chrome is already running with CDP
-        String tabs = listTabsViaCdp();
-        if (tabs != null) {
-            return "Chrome is already running.\n" + tabs;
-        }
-        if (BrowserCacheCleaner.inUse()) {
-            return "Error: DLC's Chrome profile is already in use without a reachable CDP port.";
-        }
-        BrowserCacheCleaner.prune();
-
-        // Detect OS and Chrome path
-        String os = System.getProperty("os.name", "").toLowerCase();
-        List<String> cmd = new ArrayList<>();
-
-        if (os.contains("mac")) {
-            // macOS: try common Chrome locations
-            String chromePath = findChromeMac();
-            if (chromePath == null) {
-                return "Error: Chrome not found on macOS. Please install Google Chrome.";
-            }
-            cmd.add(chromePath);
-        } else if (os.contains("win")) {
-            String chromePath = findChromeWindows();
-            if (chromePath == null) {
-                return "Error: Chrome not found on Windows. Please install Google Chrome.";
-            }
-            cmd.add(chromePath);
-        } else {
-            // Linux
-            cmd.add(findChromeLinux());
-        }
-
-        String profileDir = BrowserCacheCleaner.PROFILE.toString();
-        cmd.add("--remote-debugging-port=" + CDP_PORT);
-        cmd.add("--user-data-dir=" + profileDir);
-        cmd.add("--disk-cache-size=67108864");
-        cmd.add("--media-cache-size=33554432");
-        cmd.add("--no-first-run");
-        cmd.add("--no-default-browser-check");
-
+    public synchronized String browserStart() {
         try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-            ownedChrome = pb.start();
-
-            // Wait for Chrome to start
-            for (int i = 0; i < 10; i++) {
-                Thread.sleep(1000);
-                tabs = listTabsViaCdp();
-                if (tabs != null) {
-                    synchronized (ownedHandles) {
-                        ownedHandles.add(ownedChrome.toHandle());
-                        ownedChrome.toHandle().descendants().forEach(ownedHandles::add);
+            Files.createDirectories(runtime);
+            // Serialize startup across DLC instances, in addition to method synchronization.
+            try (FileChannel channel = FileChannel.open(runtime.resolve("launch.lock"),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+                FileLock lock;
+                try { lock = channel.tryLock(); }
+                catch (java.nio.channels.OverlappingFileLockException e) { lock = null; }
+                if (lock == null) return "Error: Another DLC instance is starting Chrome. Wait and observe again.";
+                try (FileLock acquired = lock) {
+                    String tabs = listTabsViaCdp();
+                    if (tabs != null) return "Chrome is already running.\n" + tabs;
+                    if (cdpProblem != null && !managedEndpoint) return "Error: " + cdpProblem;
+                    if ((ownedChrome != null && ownedChrome.isAlive()) || BrowserCacheCleaner.inUse(profile)) {
+                        return "Error: DLC Chrome is running but CDP is unavailable. Do not launch another browser or delete profile locks.";
                     }
-                    return "Chrome started successfully.\n" + tabs;
+                    if (profile.equals(BrowserCacheCleaner.PROFILE)) BrowserCacheCleaner.prune();
+                    String os = System.getProperty("os.name", "").toLowerCase();
+                    String executable = os.contains("mac") ? findChromeMac()
+                            : os.contains("win") ? findChromeWindows() : findChromeLinux();
+                    if (executable == null) return "Error: Google Chrome is not installed.";
+                    Files.createDirectories(profile);
+                    Path tmp = runtime.resolve("tmp");
+                    Files.createDirectories(tmp);
+                    Path startupLog = runtime.resolve("chrome-startup.log");
+                    List<String> cmd = List.of(executable,
+                            "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=" + (managedEndpoint ? 0 : CDP_PORT),
+                            "--user-data-dir=" + profile,
+                            "--disk-cache-size=67108864", "--media-cache-size=33554432",
+                            "--no-first-run", "--no-default-browser-check", "about:blank");
+                    ProcessBuilder pb = new ProcessBuilder(cmd).redirectErrorStream(true)
+                            .redirectOutput(startupLog.toFile());
+                    setTemporaryEnvironment(pb, tmp);
+                    ownedChrome = pb.start();
+                    for (int i = 0; i < 30; i++) {
+                        tabs = listTabsViaCdp();
+                        if (tabs != null) return "Chrome started successfully.\n" + tabs;
+                        if (!ownedChrome.isAlive()) break;
+                        Thread.sleep(250);
+                    }
+                    // Only clean up the process we started. Never close the user's other Chrome.
+                    ProcessIsolation.destroyTree(ownedChrome);
+                    ownedChrome = null;
+                    String detail = Files.readString(startupLog, StandardCharsets.UTF_8);
+                    if (detail.length() > 2400) detail = detail.substring(detail.length() - 2400);
+                    return "Error: Chrome did not expose a valid CDP endpoint. Startup log: "
+                            + startupLog + "\n" + detail;
                 }
             }
-            return "Chrome process started but CDP not responding. "
-                    + "If Chrome was already running, close it first and retry.";
+        } catch (InterruptedException e) {
+            ProcessIsolation.destroyTree(ownedChrome);
+            ownedChrome = null;
+            Thread.currentThread().interrupt();
+            return "Error: Chrome startup cancelled.";
         } catch (Exception e) {
-            return "Error starting Chrome: " + e.getMessage()
-                    + "\nTry starting Chrome manually with: --remote-debugging-port=" + CDP_PORT;
+            ProcessIsolation.destroyTree(ownedChrome);
+            ownedChrome = null;
+            return "Error starting Chrome: " + e.getMessage();
         }
     }
 
     @Tool(name = "browser_view", description = "Analyze the current page in the browser. "
-            + "Returns page structure: title, URL, headings, forms (fields + buttons), "
-            + "buttons, links, images, tables, and main text content. "
+            + "Returns success, title, URL, tab, viewport, screenshot, actionable element refs, "
+            + "headings, iframe selectors and main text content. "
             + "Call browser_start first, then use this to understand the page before performing actions.")
-    public String browserView(
+    public synchronized String browserView(
             @ToolParam(required = false, description = "Tab index to view (default: 0 = first tab)") Integer tab,
             @ToolParam(required = false, description = "Optional path to save screenshot, e.g. /tmp/page.png") String screenshot) {
 
-        Path script = SCRIPTS_DIR.resolve("browser_cdp.py");
+        if (listTabsViaCdp() == null) return "Error: " + (cdpProblem != null ? cdpProblem
+                : "Chrome is not connected. Call browser_start once before operating.");
         if (!Files.exists(script)) {
             return "Error: browser_cdp.py not found. Restart DLC to extract built-in scripts.";
         }
@@ -127,7 +149,7 @@ public class BrowserTool {
         cmd.add(script.toString());
         cmd.add("view");
         cmd.add("--cdp-url");
-        cmd.add(CDP_URL);
+        cmd.add(cdpUrl);
         if (tab != null) {
             cmd.add("--tab");
             cmd.add(String.valueOf(tab));
@@ -135,7 +157,7 @@ public class BrowserTool {
         // Auto-screenshot: always capture so the model can "see" the page
         cmd.add("--screenshot");
         cmd.add((screenshot != null && !screenshot.isBlank()) ? screenshot
-                : Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_view.png").toString());
+                : screenshotPath("view").toString());
         return runProcess(cmd);
     }
 
@@ -143,10 +165,12 @@ public class BrowserTool {
             + "Call browser_view first to understand the page layout, then use this to interact. "
             + "Supported actions: goto (navigate to URL), click, click_xy (click at pixel coordinates x,y), "
             + "fill, select, check, uncheck, hover, "
-            + "press, scroll, screenshot, get_text, get_attr, evaluate, wait. "
+            + "press, type, scroll, screenshot, get_text, get_attr, evaluate, wait, assert, back, forward, reload. "
+            + "Target elements using ref from the latest observation, selector, role/name, label, or text. "
+            + "Returns success, failed_step, final page observation and screenshot; stops at the first failed action. "
             + "Actions execute in sequence. The browser stays open after actions complete - "
             + "login state, cookies, and page state are PRESERVED for next call.")
-    public String browserAction(
+    public synchronized String browserAction(
             @ToolParam(description = "JSON array of actions. Examples:\n"
                     + "Navigate: [{\"action\":\"goto\",\"url\":\"https://example.com\"}]\n"
                     + "Fill + Click: [{\"action\":\"fill\",\"selector\":\"#username\",\"value\":\"admin\"},"
@@ -159,7 +183,8 @@ public class BrowserTool {
             @ToolParam(required = false, description = "Tab index (default: 0)") Integer tab,
             @ToolParam(required = false, description = "Optional path to save final screenshot") String screenshot) {
 
-        Path script = SCRIPTS_DIR.resolve("browser_cdp.py");
+        if (listTabsViaCdp() == null) return "Error: " + (cdpProblem != null ? cdpProblem
+                : "Chrome is not connected. Call browser_start once before operating.");
         if (!Files.exists(script)) {
             return "Error: browser_cdp.py not found. Restart DLC to extract built-in scripts.";
         }
@@ -167,7 +192,12 @@ public class BrowserTool {
         // 将 JSON 写入临时文件，避免 Windows 命令行双引号转义问题
         Path actionsFile;
         try {
-            actionsFile = Files.createTempFile("dlc-actions-", ".json");
+            var parsed = mapper.readTree(actions);
+            if (parsed == null || !parsed.isArray() || parsed.isEmpty() || parsed.size() > 20) {
+                return "Error: actions must be a JSON array with 1..20 actions.";
+            }
+            Files.createDirectories(runtime.resolve("tmp"));
+            actionsFile = Files.createTempFile(runtime.resolve("tmp"), "dlc-actions-", ".json");
             Files.writeString(actionsFile, actions, StandardCharsets.UTF_8);
         } catch (Exception e) {
             return "Error: Failed to write actions file: " + e.getMessage();
@@ -178,7 +208,7 @@ public class BrowserTool {
         cmd.add(script.toString());
         cmd.add("action");
         cmd.add("--cdp-url");
-        cmd.add(CDP_URL);
+        cmd.add(cdpUrl);
         cmd.add("--actions-file");
         cmd.add(actionsFile.toString());
         if (tab != null) {
@@ -188,7 +218,7 @@ public class BrowserTool {
         // Auto-screenshot: always capture so the model can "see" the result
         cmd.add("--screenshot");
         cmd.add((screenshot != null && !screenshot.isBlank()) ? screenshot
-                : Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_action.png").toString());
+                : screenshotPath("action").toString());
         try {
             return runProcess(cmd);
         } finally {
@@ -202,64 +232,67 @@ public class BrowserTool {
      * Query CDP endpoint to list open tabs. Returns null if Chrome is not running.
      */
     private String listTabsViaCdp() {
+        cdpProblem = null;
         try {
-            HttpURLConnection conn = (HttpURLConnection) URI.create(
-                    CDP_URL + "/json/list").toURL().openConnection();
-            conn.setConnectTimeout(2000);
-            conn.setReadTimeout(2000);
-
-            if (conn.getResponseCode() == 200) {
-                StringBuilder sb = new StringBuilder();
-                try (BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream()))) {
-                    String line;
-                    while ((line = r.readLine()) != null) {
-                        sb.append(line);
-                    }
-                }
-                // Parse and format tab list
-                return formatTabs(sb.toString());
+            discoverManagedEndpoint();
+            var version = readCdpJson("/json/version");
+            URI websocket = URI.create(version.path("webSocketDebuggerUrl").asText(""));
+            if (!"ws".equals(websocket.getScheme()) || websocket.getPath() == null
+                    || !websocket.getPath().startsWith("/devtools/browser/")) {
+                cdpProblem = "Endpoint is occupied by a service without a Chrome CDP endpoint.";
+                return null;
             }
-        } catch (Exception ignored) {
-        }
-        return null;
-    }
-
-    private String formatTabs(String jsonArray) {
-        try {
-            // Simple JSON array parsing without Jackson dependency
-            StringBuilder result = new StringBuilder("Open tabs:\n");
-            int index = 0;
-            int pos = 0;
-            while (pos < jsonArray.length()) {
-                int titleStart = jsonArray.indexOf("\"title\":", pos);
-                if (titleStart < 0) break;
-                int urlStart = jsonArray.indexOf("\"url\":", pos);
-                if (urlStart < 0) break;
-
-                String title = extractJsonString(jsonArray, titleStart + 8);
-                String url = extractJsonString(jsonArray, urlStart + 6);
-
-                if (!"".equals(url) && !url.startsWith("devtools://")) {
-                    result.append(String.format("  [%d] %s - %s%n", index, title, url));
-                    index++;
-                }
-                pos = Math.max(titleStart, urlStart) + 10;
-            }
-            if (index == 0) {
-                result.append("  (no tabs open)\n");
-            }
-            return result.toString();
+            return formatTabs(readCdpJson("/json/list").toString());
+        } catch (ConnectException ignored) {
+            return null;
         } catch (Exception e) {
-            return "Tabs: (unable to parse)";
+            cdpProblem = "CDP endpoint is invalid or unavailable: " + e.getMessage();
+            return null;
         }
     }
 
-    private String extractJsonString(String json, int startPos) {
-        int quote1 = json.indexOf('"', startPos);
-        if (quote1 < 0) return "";
-        int quote2 = json.indexOf('"', quote1 + 1);
-        if (quote2 < 0) return "";
-        return json.substring(quote1 + 1, quote2);
+    private void discoverManagedEndpoint() throws Exception {
+        if (!managedEndpoint) return;
+        Path active = profile.resolve("DevToolsActivePort");
+        if (!Files.isRegularFile(active) || Files.size(active) > 1024) return;
+        List<String> lines = Files.readAllLines(active, StandardCharsets.UTF_8);
+        if (lines.size() < 2 || !lines.get(1).startsWith("/devtools/browser/")) return;
+        int port = Integer.parseInt(lines.get(0));
+        if (port > 0 && port <= 65535) cdpUrl = "http://127.0.0.1:" + port;
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode readCdpJson(String endpoint) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) URI.create(cdpUrl + endpoint).toURL().openConnection();
+        conn.setConnectTimeout(1500);
+        conn.setReadTimeout(1500);
+        try {
+            if (conn.getResponseCode() != 200) throw new java.io.IOException(endpoint + " returned HTTP " + conn.getResponseCode());
+            try (var input = conn.getInputStream()) { return mapper.readTree(input); }
+        } finally { conn.disconnect(); }
+    }
+
+    String formatTabs(String jsonArray) throws Exception {
+        var targets = mapper.readTree(jsonArray);
+        if (targets == null || !targets.isArray()) throw new java.io.IOException("CDP tab list must be a JSON array");
+        StringBuilder result = new StringBuilder("Open tabs:\n");
+        int index = 0;
+        for (var target : targets) {
+            if (!"page".equals(target.path("type").asText())) continue;
+            result.append("  [").append(index++).append("] ")
+                    .append(target.path("title").asText()).append(" - ")
+                    .append(target.path("url").asText()).append('\n');
+        }
+        if (index == 0) result.append("  (no tabs open)\n");
+        return result.toString();
+    }
+
+    private Path screenshotPath(String operation) {
+        String session = Integer.toHexString(String.valueOf(ExecutionContext.sessionId()).hashCode());
+        return runtime.resolve("screenshots").resolve(session).resolve(operation + ".png");
+    }
+
+    private static void setTemporaryEnvironment(ProcessBuilder pb, Path tmp) {
+        for (String name : List.of("TMPDIR", "TMP", "TEMP")) pb.environment().put(name, tmp.toString());
     }
 
     private String findChromeMac() {
@@ -302,14 +335,20 @@ public class BrowserTool {
     }
 
     private String runProcess(List<String> command) {
+        Process process = null;
         try {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.redirectErrorStream(true);
-            Process process = pb.start();
+            Path tmp = runtime.resolve("tmp");
+            Files.createDirectories(tmp);
+            setTemporaryEnvironment(pb, tmp);
+            pb.environment().put("PYTHONIOENCODING", "utf-8");
+            process = pb.start();
+            Process running = process;
 
             StringBuilder output = new StringBuilder();
             Thread readerThread = new Thread(() -> {
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(running.getInputStream(), StandardCharsets.UTF_8))) {
                     char[] chunk = new char[4_096];
                     int count;
                     while ((count = reader.read(chunk)) != -1) {
@@ -323,12 +362,12 @@ public class BrowserTool {
             readerThread.setDaemon(true);
             readerThread.start();
             if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
+                ProcessIsolation.destroyTree(process);
                 return "Error: Browser operation timed out after " + TIMEOUT_SECONDS + "s.";
             }
             readerThread.join(1_000);
 
-            String result = output.toString();
+            String result = normalizeProcessOutput(output.toString());
 
             if (process.exitValue() != 0) {
                 if (result.contains("No module named 'playwright'")) {
@@ -338,30 +377,39 @@ public class BrowserTool {
                 if (result.contains("connect") && result.contains("refused")) {
                     return "Error: Cannot connect to Chrome. Call browser_start first.";
                 }
+                // Structured Python failures retain the screenshot and actual page state.
+                if (result.stripLeading().startsWith("{")) return result;
                 return "Error (exit " + process.exitValue() + "): " + result;
             }
 
-            return truncator.truncate(result);
+            // Let AgentLoop interpret structured status before it compacts the result.
+            return result.stripLeading().startsWith("{") ? result : truncator.truncate(result);
+        } catch (InterruptedException e) {
+            ProcessIsolation.destroyTree(process);
+            Thread.currentThread().interrupt();
+            return "Error: Browser operation cancelled.";
         } catch (Exception e) {
+            ProcessIsolation.destroyTree(process);
             return "Error: " + e.getMessage();
         }
     }
 
-    @PreDestroy
-    public void closeOwnedBrowser() {
-        synchronized (ownedHandles) {
-            for (int i = ownedHandles.size() - 1; i >= 0; i--) {
-                ProcessHandle handle = ownedHandles.get(i);
-                if (handle.isAlive()) handle.destroy();
-            }
-            ownedHandles.clear();
-        }
-        if (ownedChrome != null && ownedChrome.isAlive()) ownedChrome.destroy();
+    String normalizeProcessOutput(String output) {
+        String result = output.strip();
+        // Playwright's Node driver writes deprecation warnings to stderr. The
+        // Python protocol emits one JSON line, which must remain machine-readable.
+        int jsonLine = result.lastIndexOf("\n{");
+        String candidate = jsonLine >= 0 ? result.substring(jsonLine + 1) : result;
         try {
-            if (ownedChrome != null) ownedChrome.waitFor(3, TimeUnit.SECONDS);
-            Files.deleteIfExists(Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_view.png"));
-            Files.deleteIfExists(Path.of(System.getProperty("java.io.tmpdir"), "dlc_browser_action.png"));
+            if (mapper.readTree(candidate).isObject()) return candidate;
         } catch (Exception ignored) { }
-        BrowserCacheCleaner.prune();
+        return result;
+    }
+
+    @PreDestroy
+    public synchronized void closeOwnedBrowser() {
+        ProcessIsolation.destroyTree(ownedChrome);
+        ownedChrome = null;
+        if (profile.equals(BrowserCacheCleaner.PROFILE)) BrowserCacheCleaner.prune();
     }
 }

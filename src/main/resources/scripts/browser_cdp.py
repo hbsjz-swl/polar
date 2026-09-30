@@ -1,445 +1,252 @@
 #!/usr/bin/env python3
-"""
-Browser CDP - Connect to an existing Chrome browser via Chrome DevTools Protocol.
-
-Prerequisites:
-    Chrome must be running with: --remote-debugging-port=9222
-
-Usage:
-    python browser_cdp.py view [--cdp-url URL] [--tab N] [--screenshot PATH]
-    python browser_cdp.py action --actions JSON [--cdp-url URL] [--tab N] [--screenshot PATH]
-"""
-
-from playwright.sync_api import sync_playwright
+"""Observe and operate a long-lived Chrome over CDP without launching more windows."""
 import argparse
 import json
 import sys
+from pathlib import Path
+from urllib.parse import urlparse
+from playwright.sync_api import sync_playwright
 
-
-DEFAULT_CDP_URL = "http://localhost:9222"
+DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+SUPPORTED = {'goto', 'click', 'click_xy', 'fill', 'type', 'select', 'check', 'uncheck',
+             'hover', 'press', 'scroll', 'screenshot', 'get_text', 'get_attr', 'evaluate',
+             'wait', 'assert', 'back', 'forward', 'reload'}
+TARGETED = {'click', 'fill', 'type', 'select', 'check', 'uncheck', 'hover', 'get_text', 'get_attr'}
 
 
 def connect_browser(p, cdp_url):
-    """Connect to Chrome via CDP."""
-    try:
-        browser = p.chromium.connect_over_cdp(cdp_url)
-        return browser
-    except Exception as e:
-        error_msg = str(e)
-        if "connect" in error_msg.lower() or "refused" in error_msg.lower():
-            print(json.dumps({
-                "error": "无法连接到 Chrome。请先调用 browser_start 启动浏览器。",
-                "cdp_url": cdp_url,
-                "details": error_msg
-            }, ensure_ascii=False))
-        else:
-            print(json.dumps({
-                "error": f"CDP connection failed: {error_msg}",
-                "cdp_url": cdp_url
-            }, ensure_ascii=False))
-        sys.exit(1)
+    return p.chromium.connect_over_cdp(cdp_url, timeout=10000)
 
 
 def get_page(browser, tab_index=0):
-    """Get a page by tab index."""
-    pages = []
-    for ctx in browser.contexts:
-        pages.extend(ctx.pages)
-
-    if not pages:
-        if browser.contexts:
-            return browser.contexts[0].new_page()
-        return None
-
-    if tab_index >= len(pages):
-        tab_index = len(pages) - 1
-
+    pages = [page for ctx in browser.contexts for page in ctx.pages if not page.is_closed()]
+    if not pages and tab_index == 0 and browser.contexts:
+        return browser.contexts[0].new_page()
+    if tab_index < 0 or tab_index >= len(pages):
+        raise ValueError(f'Tab {tab_index} does not exist; available tabs: {len(pages)}')
     return pages[tab_index]
 
 
-def get_selector(el):
-    """为元素生成可靠的 CSS 选择器。优先级: #id > [name] > [data-testid] > 文本选择器 > nth-child 路径。"""
-    try:
-        sel = el.evaluate("""el => {
-            // 1. id
-            if (el.id) return '#' + CSS.escape(el.id);
+# One DOM round trip. Refs refer to the most recent observation only.
+SNAPSHOT = r'''() => {
+    const visible = el => !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+    document.querySelectorAll('[data-dlc-ref]').forEach(el => el.removeAttribute('data-dlc-ref'));
+    const elements = [];
+    let n = 0;
+    const nodes = Array.from(document.querySelectorAll('input,textarea,select,button,a[href],[role="button"],[role="textbox"],[contenteditable="true"]'));
+    nodes.sort((a,b) => (a.tagName === 'A') - (b.tagName === 'A'));
+    for (const el of nodes) {
+        if (!visible(el) || el.type === 'hidden') continue;
+        const ref = 'e' + (++n);
+        el.setAttribute('data-dlc-ref', ref);
+        const box = el.getBoundingClientRect();
+        const label = el.getAttribute('aria-label') ||
+            (el.labels && el.labels.length ? el.labels[0].innerText : '') ||
+            el.getAttribute('placeholder') || el.innerText || el.getAttribute('value') || el.name || el.id || '';
+        elements.push({ref, selector: '[data-dlc-ref="' + ref + '"]',
+            tag: el.tagName.toLowerCase(), type: el.type || el.getAttribute('role') || '',
+            label: label.trim().slice(0,80), disabled: !!el.disabled,
+            ...(el.tagName === 'A' ? {href: el.href} : {}),
+            ...(el.value && el.type !== 'password' ? {value: el.value.slice(0,80)} : {}),
+            ...(box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth
+                ? {center: {x: Math.round(box.x + box.width/2), y: Math.round(box.y + box.height/2)}} : {})});
+        if (elements.length >= 18) break;
+    }
+    return {url: location.href, title: document.title, ready_state: document.readyState,
+        viewport: {width: innerWidth, height: innerHeight, device_scale_factor: devicePixelRatio},
+        interactive_elements: elements,
+        headings: Array.from(document.querySelectorAll('h1,h2,h3')).filter(visible).slice(0,8)
+            .map(el => el.innerText.trim().slice(0,120)),
+        main_text: ((document.querySelector('main,article,[role="main"],#content_left') || document.body).innerText || '').slice(0,1200)};
+}'''
 
-            // 2. name 属性
-            const name = el.getAttribute('name');
-            if (name) {
-                const tag = el.tagName.toLowerCase();
-                const sel = tag + '[name="' + name + '"]';
-                if (document.querySelectorAll(sel).length === 1) return sel;
-            }
 
-            // 3. data-testid
-            const testId = el.getAttribute('data-testid') || el.getAttribute('data-test');
-            if (testId) return '[data-testid="' + testId + '"]';
-
-            // 4. aria-label
-            const ariaLabel = el.getAttribute('aria-label');
-            if (ariaLabel) {
-                const tag = el.tagName.toLowerCase();
-                const sel = tag + '[aria-label="' + ariaLabel + '"]';
-                if (document.querySelectorAll(sel).length === 1) return sel;
-            }
-
-            // 5. placeholder
-            const placeholder = el.getAttribute('placeholder');
-            if (placeholder) {
-                const tag = el.tagName.toLowerCase();
-                const sel = tag + '[placeholder="' + placeholder + '"]';
-                if (document.querySelectorAll(sel).length === 1) return sel;
-            }
-
-            // 6. 唯一 class 组合
-            if (el.classList.length > 0) {
-                const tag = el.tagName.toLowerCase();
-                const cls = '.' + Array.from(el.classList).map(c => CSS.escape(c)).join('.');
-                const sel = tag + cls;
-                if (document.querySelectorAll(sel).length === 1) return sel;
-            }
-
-            // 7. nth-child 路径 (最后手段)
-            const parts = [];
-            let node = el;
-            while (node && node !== document.body && parts.length < 4) {
-                const tag = node.tagName.toLowerCase();
-                if (node.id) {
-                    parts.unshift('#' + CSS.escape(node.id));
-                    break;
-                }
-                const parent = node.parentElement;
-                if (parent) {
-                    const siblings = Array.from(parent.children).filter(c => c.tagName === node.tagName);
-                    if (siblings.length > 1) {
-                        const idx = siblings.indexOf(node) + 1;
-                        parts.unshift(tag + ':nth-child(' + idx + ')');
-                    } else {
-                        parts.unshift(tag);
-                    }
-                } else {
-                    parts.unshift(tag);
-                }
-                node = parent;
-            }
-            return parts.join(' > ');
-        }""")
-        return sel
-    except:
-        return None
+def save_screenshot(page, path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=path, full_page=False, scale='css', timeout=5000)
+    return f'{path} [SCREENSHOT:{path}]'
 
 
 def view_page(page, screenshot_path=None):
-    """Analyze current page structure with actionable selectors."""
-    info = {"url": page.url, "title": page.title()}
-
-    # ===== 可交互元素（统一收集，带选择器）=====
-    interactive = []
-
-    # 输入框、文本域、下拉框
-    for el in page.locator("input, textarea, select").all():
-        try:
-            if not el.is_visible():
-                continue
-            itype = el.get_attribute("type") or "text"
-            if itype in ("hidden",):
-                continue
-            tag = el.evaluate("el => el.tagName.toLowerCase()")
-            selector = get_selector(el)
-            if not selector:
-                continue
-            label = (
-                el.get_attribute("placeholder")
-                or el.get_attribute("aria-label")
-                or el.get_attribute("name")
-                or el.get_attribute("id")
-                or ""
-            )
-            value = ""
-            try:
-                value = el.input_value()
-            except:
-                pass
-            item = {"tag": tag, "type": itype, "label": label, "selector": selector}
-            if value:
-                item["value"] = value[:100]
-            interactive.append(item)
-        except:
-            pass
-
-    # 按钮
-    for el in page.locator("button, [role='button'], input[type='submit'], input[type='button']").all():
-        try:
-            if not el.is_visible():
-                continue
-            text = el.inner_text().strip()
-            if not text:
-                text = el.get_attribute("value") or el.get_attribute("aria-label") or ""
-            if not text or len(text) > 80:
-                continue
-            selector = get_selector(el)
-            if not selector:
-                continue
-            interactive.append({"tag": "button", "text": text, "selector": selector})
-        except:
-            pass
-
-    info["interactive_elements"] = interactive[:60]
-
-    # ===== 链接 =====
-    links = []
-    for a in page.locator("a[href]").all():
-        try:
-            if not a.is_visible():
-                continue
-            text = a.inner_text().strip()
-            href = a.get_attribute("href") or ""
-            if not text or len(text) > 120:
-                continue
-            selector = get_selector(a)
-            links.append({"text": text, "href": href, "selector": selector})
-        except:
-            pass
-    info["links"] = links[:50]
-
-    # ===== 标题 =====
-    headings = []
-    for h in page.locator("h1, h2, h3, h4").all():
-        try:
-            if h.is_visible():
-                tag = h.evaluate("el => el.tagName")
-                text = h.inner_text().strip()
-                if text:
-                    headings.append(f"[{tag}] {text}")
-        except:
-            pass
-    info["headings"] = headings
-
-    # ===== 表单概览 =====
-    forms = []
-    for form in page.locator("form").all():
-        try:
-            selector = get_selector(form)
-            action = form.get_attribute("action") or ""
-            method = form.get_attribute("method") or "get"
-            forms.append({"selector": selector, "action": action, "method": method})
-        except:
-            pass
-    info["forms"] = forms[:10]
-
-    # ===== 表格 =====
-    tables = []
-    for table in page.locator("table").all():
-        try:
-            if table.is_visible():
-                headers = [th.inner_text().strip() for th in table.locator("th").all()]
-                row_count = len(table.locator("tr").all())
-                selector = get_selector(table)
-                tables.append({"headers": headers, "rows": row_count, "selector": selector})
-        except:
-            pass
-    info["tables"] = tables[:10]
-
-    # ===== 主要文本内容 =====
-    try:
-        main_el = page.locator("main, article, [role='main'], .content, #content").first
-        if main_el.is_visible():
-            info["main_text"] = main_el.inner_text()[:3000]
-        else:
-            raise Exception()
-    except:
-        try:
-            info["main_text"] = page.locator("body").inner_text()[:3000]
-        except:
-            info["main_text"] = ""
-
-    # ===== 截图 =====
+    info = {'success': True}
     if screenshot_path:
         try:
-            page.screenshot(path=screenshot_path, full_page=False)
-            info["screenshot"] = f"{screenshot_path} [SCREENSHOT:{screenshot_path}]"
+            info['screenshot'] = save_screenshot(page, screenshot_path)
         except Exception as e:
-            info["screenshot_error"] = str(e)
-
-    # ===== 使用提示 =====
-    info["_hint"] = "使用 selector 字段的值作为 browser_action 的 selector 参数。例如: {\"action\":\"click\",\"selector\":\"#search-btn\"}"
-
+            info['screenshot_error'] = str(e)[:300]
+    info.update(page.evaluate(SNAPSHOT))
+    info['tab'] = [p for p in page.context.pages if not p.is_closed()].index(page)
+    info['frames'] = page.evaluate("() => Array.from(document.querySelectorAll('iframe')).slice(0,8).map((el,i) => {el.setAttribute('data-dlc-frame', String(i)); return {selector:'iframe[data-dlc-frame=\"'+i+'\"]',title:el.title,url:el.src};})")
     return info
 
 
+def has_target(act):
+    return any(act.get(k) for k in ('selector', 'ref', 'role', 'label', 'text'))
+
+
+def locator_for(page, act):
+    scope = page.frame_locator(act['frame']) if act.get('frame') else page
+    if act.get('ref'):
+        ref = act['ref']
+        if not isinstance(ref, str) or not ref.startswith('e') or not ref[1:].isdigit():
+            raise ValueError('Invalid element ref; observe the page again')
+        return scope.locator(f'[data-dlc-ref="{ref}"]')
+    if act.get('selector'):
+        return scope.locator(act['selector'])
+    if act.get('role'):
+        kwargs = {'name': act['name'], 'exact': True} if 'name' in act else {}
+        return scope.get_by_role(act['role'], **kwargs)
+    if act.get('label'):
+        return scope.get_by_label(act['label'], exact=True)
+    if act.get('text'):
+        return scope.get_by_text(act['text'], exact=True)
+    raise ValueError('Missing target: use ref, selector, role/name, label or text')
+
+
+def validate_actions(actions):
+    if not isinstance(actions, list) or not 1 <= len(actions) <= 20:
+        raise ValueError('actions must be an array with 1..20 actions')
+    for act in actions:
+        if not isinstance(act, dict) or act.get('action') not in SUPPORTED:
+            raise ValueError(f'Unsupported action: {act}')
+        action = act['action']
+        if action in TARGETED and not has_target(act):
+            raise ValueError(f'{action} requires an element target')
+        if action == 'goto' and urlparse(act.get('url', '')).scheme not in ('http', 'https', 'about', 'file'):
+            raise ValueError('goto requires an absolute http(s), about or file URL')
+        if action == 'click_xy' and not all(isinstance(act.get(k), (int, float)) and act[k] >= 0 for k in ('x', 'y')):
+            raise ValueError('click_xy requires non-negative x/y viewport coordinates')
+        if action in ('fill', 'type', 'select') and 'value' not in act:
+            raise ValueError(f'{action} requires value')
+        if action == 'assert' and not (has_target(act) or act.get('url')):
+            raise ValueError('assert requires a target or URL pattern')
+
+
+def settle(page):
+    # Long polling/analytics prevent networkidle. Callers can wait/assert the
+    # element or URL that actually indicates completion.
+    try:
+        page.wait_for_load_state('domcontentloaded', timeout=5000)
+    except Exception:
+        pass
+    page.wait_for_timeout(150)
+
+
 def perform_actions(page, actions, screenshot_path=None):
-    """Perform actions on the page."""
+    validate_actions(actions)
     results = []
-    console_logs = []
-    page.on("console", lambda msg: console_logs.append(f"[{msg.type}] {msg.text}"))
-
+    failed_step = None
     for i, act in enumerate(actions):
-        action = act.get("action", "")
-        selector = act.get("selector", "")
-        step = {"step": i + 1, "action": action}
-
+        action = act['action']
+        step = {'step': i + 1, 'action': action, 'success': True}
         try:
-            if action == "goto":
-                url = act.get("url", selector)
-                page.goto(url, timeout=30000)
-                page.wait_for_load_state("networkidle", timeout=15000)
-                step["result"] = f"Navigated to: {page.url}"
-
-            elif action == "click":
-                page.locator(selector).click(timeout=5000)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                except:
-                    pass
-                step["result"] = f"Clicked: {selector}"
-                step["new_url"] = page.url
-
-            elif action == "click_xy":
-                x = act.get("x", 0)
-                y = act.get("y", 0)
-                page.mouse.click(x, y)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=5000)
-                except:
-                    pass
-                step["result"] = f"Clicked at ({x}, {y})"
-                step["new_url"] = page.url
-
-            elif action == "fill":
-                page.locator(selector).fill(act.get("value", ""))
-                step["result"] = f"Filled: {selector}"
-
-            elif action == "select":
-                page.locator(selector).select_option(act.get("value", ""))
-                step["result"] = f"Selected: {act.get('value', '')}"
-
-            elif action == "check":
-                page.locator(selector).check()
-                step["result"] = f"Checked: {selector}"
-
-            elif action == "uncheck":
-                page.locator(selector).uncheck()
-                step["result"] = f"Unchecked: {selector}"
-
-            elif action == "hover":
-                page.locator(selector).hover()
-                step["result"] = f"Hovered: {selector}"
-
-            elif action == "scroll":
-                direction = act.get("direction", "down")
-                amount = act.get("amount", 500)
-                delta = amount if direction == "down" else -amount
-                page.mouse.wheel(0, delta)
-                page.wait_for_timeout(500)
-                step["result"] = f"Scrolled {direction} by {amount}px"
-
-            elif action == "wait":
-                t = act.get("timeout", 5000)
-                page.locator(selector).wait_for(timeout=t)
-                step["result"] = f"Found: {selector}"
-
-            elif action == "screenshot":
-                path = act.get("path", f"/tmp/step_{i + 1}.png")
-                page.screenshot(path=path, full_page=act.get("full_page", False))
-                step["result"] = f"Screenshot saved: {path} [SCREENSHOT:{path}]"
-
-            elif action == "get_text":
-                text = page.locator(selector).inner_text()
-                step["result"] = text[:3000]
-
-            elif action == "get_attr":
-                attr = act.get("attr", "href")
-                val = page.locator(selector).get_attribute(attr)
-                step["result"] = val
-
-            elif action == "evaluate":
-                val = page.evaluate(act.get("script", ""))
-                step["result"] = str(val)[:3000]
-
-            elif action == "press":
-                key = act.get("key", "Enter")
-                if selector:
-                    page.locator(selector).press(key)
+            timeout = min(15000, max(100, int(act.get('timeout', 7000))))
+            before_pages = list(page.context.pages)
+            target = locator_for(page, act) if has_target(act) else None
+            if action in TARGETED | {'press'} and target is not None and target.count() == 1 and not target.is_visible():
+                raise ValueError('Target is hidden. Choose the visible textarea/input/button ref from final.interactive_elements; do not retry this hidden selector.')
+            if action == 'goto':
+                response = page.goto(act['url'], timeout=30000, wait_until='domcontentloaded')
+                if response is not None and response.status >= 400:
+                    raise RuntimeError(f'HTTP {response.status} at {page.url}')
+            elif action in ('back', 'forward', 'reload'):
+                method = {'back': page.go_back, 'forward': page.go_forward, 'reload': page.reload}[action]
+                method(wait_until='domcontentloaded', timeout=30000)
+            elif action in ('click', 'check', 'uncheck', 'hover'):
+                getattr(target, action)(timeout=timeout)
+            elif action == 'click_xy':
+                viewport = page.evaluate('() => ({width:innerWidth,height:innerHeight})')
+                if act['x'] >= viewport['width'] or act['y'] >= viewport['height']:
+                    raise ValueError('Coordinates outside viewport; observe/screenshot again')
+                page.mouse.click(act['x'], act['y'])
+            elif action == 'fill':
+                target.fill(str(act['value']), timeout=timeout)
+            elif action == 'type':
+                target.press_sequentially(str(act['value']), timeout=timeout)
+            elif action == 'select':
+                target.select_option(act['value'], timeout=timeout)
+            elif action == 'press':
+                if target is not None:
+                    target.press(act.get('key', 'Enter'), timeout=timeout)
                 else:
-                    page.keyboard.press(key)
-                step["result"] = f"Pressed: {key}"
-
-            else:
-                step["error"] = f"Unknown action: {action}"
-
+                    page.keyboard.press(act.get('key', 'Enter'))
+            elif action == 'scroll':
+                amount = min(3000, max(0, int(act.get('amount', 500))))
+                page.mouse.wheel(0, amount if act.get('direction', 'down') == 'down' else -amount)
+            elif action == 'screenshot':
+                step['result'] = save_screenshot(page, act.get('path') or screenshot_path or '/tmp/dlc-page.png')
+            elif action == 'get_text':
+                step['result'] = target.inner_text(timeout=timeout)[:1800]
+            elif action == 'get_attr':
+                step['result'] = target.get_attribute(act.get('attr', 'href'), timeout=timeout)
+            elif action == 'evaluate':
+                step['result'] = str(page.evaluate(act.get('script', '')))[:1800]
+            elif action in ('wait', 'assert'):
+                if act.get('url'):
+                    page.wait_for_url(act['url'], timeout=timeout, wait_until='domcontentloaded')
+                if target is not None:
+                    target.wait_for(state=act.get('state', 'visible'), timeout=timeout)
+                    if 'contains' in act and act['contains'] not in target.inner_text(timeout=timeout):
+                        raise AssertionError(f"Expected text not present: {act['contains']}")
+                elif not act.get('url'):
+                    page.wait_for_timeout(min(timeout, 2000))
+            if action in ('goto', 'click', 'click_xy', 'press', 'back', 'forward', 'reload', 'scroll'):
+                settle(page)
+                popups = [p for p in page.context.pages if p not in before_pages and not p.is_closed()]
+                if popups:
+                    page = popups[-1]
+                    settle(page)
+                    step['opened_tab'] = True
+            step['url'] = page.url
         except Exception as e:
-            step["error"] = str(e)
-
+            step.update(success=False, error=str(e)[:700])
+            failed_step = i + 1
         results.append(step)
-
-    # Final state
-    final = {
-        "final_url": page.url,
-        "final_title": page.title(),
-    }
-
-    if screenshot_path:
-        try:
-            page.screenshot(path=screenshot_path, full_page=False)
-            final["screenshot"] = f"{screenshot_path} [SCREENSHOT:{screenshot_path}]"
-        except Exception as e:
-            final["screenshot_error"] = str(e)
-
-    if console_logs:
-        final["console_logs"] = console_logs[-20:]
-
-    return {"actions": results, "final": final}
+        if failed_step is not None:
+            break  # Never submit after a failed fill.
+    output = {'success': failed_step is None, 'failed_step': failed_step}
+    if failed_step is not None:
+        output['error'] = results[-1]['error']
+        output['skipped_actions'] = len(actions) - failed_step
+    try:
+        observation = view_page(page, screenshot_path)
+        if observation.get('screenshot'):
+            output['screenshot'] = observation.pop('screenshot')
+        output.update({k: observation[k] for k in ('url','title','tab') if k in observation})
+        output['actions'] = results
+        output['final'] = observation
+    except Exception as e:
+        output.update(success=False, actions=results, observation_error=str(e)[:500])
+    return output
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Browser CDP operations")
-    parser.add_argument("mode", choices=["view", "action"],
-                        help="Mode: view (analyze page) or action (perform actions)")
-    parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL,
-                        help=f"CDP URL (default: {DEFAULT_CDP_URL})")
-    parser.add_argument("--tab", type=int, default=0,
-                        help="Tab index to operate on (default: 0)")
-    parser.add_argument("--actions", help="JSON array of actions (for action mode)")
-    parser.add_argument("--actions-file", help="Path to JSON file containing actions (alternative to --actions)")
-    parser.add_argument("--screenshot", help="Save screenshot to path")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=['view', 'action'])
+    parser.add_argument('--cdp-url', default=DEFAULT_CDP_URL)
+    parser.add_argument('--tab', type=int, default=0)
+    parser.add_argument('--actions')
+    parser.add_argument('--actions-file')
+    parser.add_argument('--screenshot')
     args = parser.parse_args()
-
-    with sync_playwright() as p:
-        browser = connect_browser(p, args.cdp_url)
-
-        try:
+    try:
+        actions = None
+        if args.mode == 'action':
+            raw = Path(args.actions_file).read_text(encoding='utf-8') if args.actions_file else args.actions
+            actions = json.loads(raw or 'null')
+            validate_actions(actions)
+        with sync_playwright() as p:
+            browser = connect_browser(p, args.cdp_url)
             page = get_page(browser, args.tab)
-            if page is None:
-                print(json.dumps({"error": "No pages available in browser"}))
-                sys.exit(1)
+            page.set_default_timeout(7000)
+            result = view_page(page, args.screenshot) if args.mode == 'view' else perform_actions(page, actions, args.screenshot)
+            print(json.dumps(result, ensure_ascii=False, separators=(',', ':')))
+            # Stop this local driver; preserve the externally owned Chrome.
+            return 0 if result['success'] else 1
+    except Exception as e:
+        print(json.dumps({'success': False, 'error': str(e)[:1200], 'cdp_url': args.cdp_url}, ensure_ascii=False))
+        return 1
 
-            if args.mode == "view":
-                result = view_page(page, args.screenshot)
 
-            elif args.mode == "action":
-                # 优先从文件读取 actions，解决 Windows 命令行 JSON 转义问题
-                actions_json = None
-                if args.actions_file:
-                    try:
-                        with open(args.actions_file, "r", encoding="utf-8") as f:
-                            actions_json = f.read()
-                    except Exception as e:
-                        print(json.dumps({"error": f"Failed to read actions file: {e}"}))
-                        sys.exit(1)
-                elif args.actions:
-                    actions_json = args.actions
-                else:
-                    print(json.dumps({"error": "--actions or --actions-file is required for action mode"}))
-                    sys.exit(1)
-                try:
-                    actions = json.loads(actions_json)
-                except json.JSONDecodeError as e:
-                    print(json.dumps({"error": f"Invalid JSON: {e}"}))
-                    sys.exit(1)
-                result = perform_actions(page, actions, args.screenshot)
-
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        finally:
-            browser.close()
+if __name__ == '__main__':
+    sys.exit(main())

@@ -15,7 +15,6 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -49,7 +48,6 @@ public final class AgentLoop {
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final Pattern SCREENSHOT = Pattern.compile("\\[SCREENSHOT:([^\\]]+)]");
     private static final int MAX_ITERATIONS = 100;
-    private static final int MAX_ROLLBACKS = 3;
     private static final int MAX_USER_CHARS = 32_000;
     private static final int MAX_TOOL_RESULT_CHARS = 4_000;
     private static final int MAX_HISTORY_RESULT_CHARS = 800;
@@ -132,9 +130,7 @@ public final class AgentLoop {
 
         TokenUsage usage = new TokenUsage();
         boolean textReplayRequired = false;
-        int rollbacks = 0;
-        Map<String, Integer> failures = new LinkedHashMap<>();
-        List<String> recentText = new ArrayList<>();
+        ToolFailureGuard failureGuard = new ToolFailureGuard();
         for (int step = 0; step < MAX_ITERATIONS; step++) {
             if (sink.isCancelled()) return;
             if (properties.isContextCompressionEnabled()
@@ -142,7 +138,7 @@ public final class AgentLoop {
                     properties.getContextWindowTokens(), model)) {
                 sink.next(new StreamEvent(StreamEvent.Type.TOKEN, "[上下文已压缩]\n"));
             }
-            boolean toolsDisabled = rollbacks >= MAX_ROLLBACKS;
+            boolean toolsDisabled = failureGuard.exhausted();
             var options = model.getOptions().mutate()
                     .toolCallbacks(toolsDisabled ? List.of() : List.of(callbacks)).build();
             Prompt prompt = new Prompt(textReplayRequired
@@ -161,20 +157,11 @@ public final class AgentLoop {
                     step--;
                     continue;
                 }
-                if (step > 0 && rollbacks < MAX_ROLLBACKS && isRecoverable(e)) {
-                    rollbacks++;
-                    rollbackLastToolExchange(messages);
-                    messages.add(new UserMessage(rollbacks == MAX_ROLLBACKS
-                            ? "[系统提示] 工具交互未被模型服务接受。请用已有信息直接回答。"
-                            : "[系统提示] 上次工具交互未被模型服务接受。请检查参数后改用其他步骤。"));
-                    continue;
-                }
                 throw e;
             }
             if (response == null || response.getResult() == null) {
                 throw new IllegalStateException("Model returned an empty response");
             }
-            rollbacks = 0;
             if (response.getMetadata() != null && response.getMetadata().getUsage() != null) {
                 var u = response.getMetadata().getUsage();
                 usage.add(value(u.getPromptTokens()), value(u.getCompletionTokens()), value(u.getTotalTokens()));
@@ -187,19 +174,6 @@ public final class AgentLoop {
                 persist(session, messages);
                 if (usage.hasData()) sink.next(new StreamEvent(StreamEvent.Type.USAGE, usage.toString()));
                 return;
-            }
-
-            String signature = limit(text.trim(), 80);
-            if (!signature.isEmpty()) {
-                recentText.add(signature);
-                if (recentText.size() > 5) recentText.remove(0);
-                if (recentText.stream().filter(signature::equals).count() >= 3) {
-                    sink.next(new StreamEvent(StreamEvent.Type.TOKEN,
-                            "\n[检测到重复执行，已结束本轮。请调整指令后重试。]"));
-                    messages.add(answer);
-                    persist(session, messages);
-                    return;
-                }
             }
 
             // Keep the exact assistant message so Spring AI can serialize its
@@ -217,7 +191,10 @@ public final class AgentLoop {
                                 "arguments", repairArguments(call.arguments())))));
                 ToolCallback callback = tools.get(name);
                 String result;
-                if (callback == null) {
+                String blocked = failureGuard.blockedReason(name, call.arguments());
+                if (blocked != null) {
+                    result = blocked;
+                } else if (callback == null) {
                     result = "Error: Unknown tool '" + name + "'";
                 } else {
                     try {
@@ -232,19 +209,20 @@ public final class AgentLoop {
                     }
                 }
                 result = decodeToolResult(result);
+                boolean failed = ToolResultStatus.failed(result);
+                failureGuard.record(name, call.arguments(), result);
                 result = limitToolResult(result, MAX_TOOL_RESULT_CHARS);
                 sink.next(new StreamEvent(StreamEvent.Type.TOOL_OUTPUT,
                         jsonData(Map.of("id", call.id(), "name", name, "result", result))));
                 sink.next(new StreamEvent(StreamEvent.Type.TOOL_CALL_FINISHED,
                         jsonData(Map.of("id", call.id(), "name", name,
-                                "success", !isToolFailure(result)))));
+                                "success", !failed))));
                 results.add(new ToolResponseMessage.ToolResponse(call.id(), name, result));
                 Matcher match = SCREENSHOT.matcher(result);
                 if (match.find()) lastScreenshot = match.group(1).trim();
-                if (isToolFailure(result)) {
-                    String key = name + "|" + limit(call.arguments(), 300) + "|" + limit(result, 160);
-                    repeatedFailure |= failures.merge(key, 1, Integer::sum) >= 2;
-                    failedTools.add(name + ": " + limit(result, 250));
+                if (failed) {
+                    repeatedFailure |= blocked != null;
+                    failedTools.add(name + ": " + limit(result, 500));
                 }
             }
             messages.add(ToolResponseMessage.builder().responses(results).build());
@@ -254,7 +232,13 @@ public final class AgentLoop {
                         : "[系统提示] 上轮工具失败。分析路径、参数、权限和环境后再决定下一步，避免原样重试。";
                 messages.add(new UserMessage(hint + "\n" + String.join("\n", failedTools)));
             }
+            if (failureGuard.exhausted()) {
+                messages.add(new UserMessage("[系统提示] 本轮已触发失败重试上限。工具已禁用。根据真实执行记录说明已完成内容和阻塞原因，不能声称失败动作已完成。"));
+            }
             if (properties.isVisionEnabled() && lastScreenshot != null) {
+                // Keep only the newest screenshot in live replay; old images do not
+                // describe the current page and inflate every following request.
+                messages.removeIf(m -> m instanceof UserMessage u && !u.getMedia().isEmpty());
                 UserMessage screenshot = imageMessage(lastScreenshot);
                 if (screenshot != null) messages.add(screenshot);
             }
@@ -267,6 +251,28 @@ public final class AgentLoop {
     }
 
     private ChatResponse streamResponse(OpenAiChatModel model, Prompt prompt, FluxSink<StreamEvent> sink) {
+        for (int attempt = 0; ; attempt++) {
+            java.util.concurrent.atomic.AtomicBoolean emitted = new java.util.concurrent.atomic.AtomicBoolean();
+            try {
+                return streamResponseOnce(model, prompt, sink, emitted);
+            } catch (RuntimeException e) {
+                // Retry only the model request before output. Completed tools and
+                // their results remain in the transcript, avoiding duplicate actions.
+                if (attempt >= 2 || emitted.get() || sink.isCancelled()
+                        || !ModelRequestRetry.transientFailure(e)) throw e;
+                sink.next(new StreamEvent(StreamEvent.Type.TOKEN,
+                        "[模型连接暂时中断，正在重连 " + (attempt + 1) + "/2]\n"));
+                try { Thread.sleep(1000L * (attempt + 1)); }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Model request cancelled", interrupted);
+                }
+            }
+        }
+    }
+
+    private ChatResponse streamResponseOnce(OpenAiChatModel model, Prompt prompt, FluxSink<StreamEvent> sink,
+                                           java.util.concurrent.atomic.AtomicBoolean outputEmitted) {
         rateLimiter.acquire();
         AtomicReference<ChatResponse> full = new AtomicReference<>();
         StringBuilder emitted = new StringBuilder();
@@ -276,6 +282,7 @@ public final class AgentLoop {
             AssistantMessage output = chunk.getResult().getOutput();
             String token = output.getText();
             if (token != null && !token.isEmpty()) {
+                outputEmitted.set(true);
                 sink.next(new StreamEvent(StreamEvent.Type.TOKEN, token));
                 emitted.append(token);
             }
@@ -283,7 +290,10 @@ public final class AgentLoop {
             if (thought instanceof String value && !value.isEmpty()) {
                 String delta = value.startsWith(reasoning.toString())
                         ? value.substring(reasoning.length()) : value;
-                if (!delta.isEmpty()) sink.next(new StreamEvent(StreamEvent.Type.REASONING, delta));
+                if (!delta.isEmpty()) {
+                    outputEmitted.set(true);
+                    sink.next(new StreamEvent(StreamEvent.Type.REASONING, delta));
+                }
                 reasoning.append(delta);
             }
         }), full::set).blockLast();
@@ -312,25 +322,6 @@ public final class AgentLoop {
             log.warn("Screenshot unavailable: {}", e.getClass().getSimpleName());
             return null;
         }
-    }
-
-    private void rollbackLastToolExchange(List<Message> messages) {
-        while (messages.size() > 1) {
-            Message last = messages.get(messages.size() - 1);
-            if (last instanceof ToolResponseMessage
-                    || last instanceof AssistantMessage assistant && assistant.hasToolCalls()
-                    || last instanceof UserMessage user && (user.getText().startsWith("[系统提示]")
-                    || !user.getMedia().isEmpty())) {
-                messages.remove(messages.size() - 1);
-            } else break;
-        }
-    }
-
-    private boolean isRecoverable(Exception e) {
-        String name = e.getClass().getSimpleName().toLowerCase();
-        String message = String.valueOf(e.getMessage());
-        return name.contains("badrequest") || name.contains("internalserver")
-                || message.contains("400") || message.contains("500");
     }
 
     private boolean isBadRequest(Throwable error) {
@@ -395,13 +386,6 @@ public final class AgentLoop {
         }
         log.warn("Invalid tool arguments; using empty object");
         return "{}";
-    }
-
-    private boolean isToolFailure(String result) {
-        String s = result == null ? "" : result.trim().toLowerCase();
-        return s.startsWith("error") || s.startsWith("failed") || s.startsWith("timed out")
-                || s.startsWith("confirmation_required") || s.contains("permission denied")
-                || s.startsWith("exit code:") && !s.startsWith("exit code: 0");
     }
 
     private void persist(Session session, List<Message> messages) {
@@ -479,6 +463,8 @@ public final class AgentLoop {
     private static String limitToolResult(String s, int max) {
         if (s == null) return "";
         if (s.length() <= max) return s;
+        String compact = ToolResultStatus.compact(s, max);
+        if (compact != null) return compact;
         int head = max * 2 / 3;
         int tail = max - head;
         return s.substring(0, head) + "\n[中间内容已省略]\n" + s.substring(s.length() - tail);

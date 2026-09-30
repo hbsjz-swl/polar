@@ -11,7 +11,7 @@ import java.util.Set;
 
 /** Prunes disposable data in DLC's dedicated Chrome profile, preserving login state. */
 final class BrowserCacheCleaner {
-    static final Path PROFILE = Path.of(System.getProperty("java.io.tmpdir"), "dlc-chrome-profile")
+    static final Path PROFILE = Path.of(System.getProperty("user.home"), ".dlc", "browser", "profile")
             .toAbsolutePath().normalize();
     private static final Set<String> CACHE_DIRS = Set.of(
             "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache",
@@ -34,7 +34,11 @@ final class BrowserCacheCleaner {
     }
 
     static boolean inUse() {
-        String profileArg = "--user-data-dir=" + PROFILE;
+        return inUse(PROFILE);
+    }
+
+    static boolean inUse(Path profile) {
+        String profileArg = "--user-data-dir=" + profile;
         try (var processes = ProcessHandle.allProcesses()) {
             return processes.anyMatch(p -> p.info().commandLine().orElse("").contains(profileArg));
         }
