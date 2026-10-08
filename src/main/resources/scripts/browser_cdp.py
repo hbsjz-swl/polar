@@ -23,6 +23,25 @@ TARGETED = {'click', 'fill', 'select', 'check', 'uncheck', 'hover', 'get_text', 
 # how a real run produced a garbled city search and a 30s hang.
 NON_ASCII_ESCAPE = re.compile(r'%[89A-Fa-f][0-9A-Fa-f]')
 
+# Playwright states the verdict on the LAST call-log line, so a head-only truncation
+# throws away the one sentence that explains the failure. A real run spent four calls
+# re-picking refs after "click: Timeout 7000ms exceeded" while the removed line said
+# the target was covered by a slider-captcha iframe.
+KEEP_HEAD = 420
+KEEP_TAIL = 260
+
+# A covered target is not a broken selector. Playwright refuses the click because
+# something else sits on top, and retrying with a different ref reproduces it exactly.
+# Only lines that NAME an overlapping element count here: "element is not stable" and
+# "element is outside of the viewport" describe the target itself, so treating them as
+# obstructions would report the victim as its own blocker.
+INTERCEPT_MARKERS = ('intercepts pointer events', 'subtree intercepts pointer events')
+
+# Third-party widget hosts that mean a human has to act. Detected from the iframe URL
+# rather than from the error text, because the error text rarely names the culprit.
+CAPTCHA_HOSTS = ('captcha', 'slidervalid', 'verify', 'geetest', 'nc_', 'puzzle',
+                 'baxia', 'slider', 'securitycheck')
+
 
 def connect_browser(p, cdp_url):
     return p.chromium.connect_over_cdp(cdp_url, timeout=10000)
@@ -40,6 +59,20 @@ def get_page(browser, tab_index=0):
 # One DOM round trip. Refs refer to the most recent observation only.
 SNAPSHOT = r'''() => {
     const visible = el => !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
+    // getClientRects() only proves the element occupies space, not that a click can
+    // reach it. A slider captcha iframe laid over the form satisfies both checks, so
+    // the element was offered to the model with a click coordinate that could never
+    // work. Probing the topmost node at the element's own centre separates "you can
+    // click this" from "something is on top of this", before any click is attempted.
+    const blockerAt = (x, y, el) => {
+        let hit = null;
+        try { hit = document.elementFromPoint(x, y); } catch (e) { return null; }
+        if (!hit || hit === el || el.contains(hit) || hit.contains(el)) return null;
+        return hit.tagName.toLowerCase() +
+            (hit.id ? '#' + hit.id : '') +
+            (hit.getAttribute && hit.getAttribute('class') ? '.' + String(hit.getAttribute('class')).trim().split(/\s+/).slice(0, 2).join('.') : '') +
+            (hit.tagName === 'IFRAME' && hit.src ? ' src=' + hit.src.slice(0, 120) : '');
+    };
     document.querySelectorAll('[data-dlc-ref]').forEach(el => el.removeAttribute('data-dlc-ref'));
     const elements = [];
     let n = 0;
@@ -53,22 +86,63 @@ SNAPSHOT = r'''() => {
         const label = el.getAttribute('aria-label') ||
             (el.labels && el.labels.length ? el.labels[0].innerText : '') ||
             el.getAttribute('placeholder') || el.innerText || el.getAttribute('value') || el.name || el.id || '';
-        elements.push({ref, selector: '[data-dlc-ref="' + ref + '"]',
+        const entry = {ref, selector: '[data-dlc-ref="' + ref + '"]',
             tag: el.tagName.toLowerCase(), type: el.type || el.getAttribute('role') || '',
             label: label.trim().slice(0,80), disabled: !!el.disabled,
             ...(el.tagName === 'A' ? {href: el.href} : {}),
-            ...(el.value && el.type !== 'password' ? {value: el.value.slice(0,80)} : {}),
-            ...(box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth
-                ? {center: {x: Math.round(box.x + box.width/2), y: Math.round(box.y + box.height/2)}} : {})});
+            ...(el.value && el.type !== 'password' ? {value: el.value.slice(0,80)} : {})};
+        if (box.bottom > 0 && box.top < innerHeight && box.right > 0 && box.left < innerWidth) {
+            const x = Math.round(box.x + box.width/2), y = Math.round(box.y + box.height/2);
+            entry.center = {x, y};
+            const blocker = blockerAt(x, y, el);
+            if (blocker) { entry.obscured = true; entry.blocked_by = blocker; }
+        }
+        elements.push(entry);
         if (elements.length >= 18) break;
     }
+    const frames = Array.from(document.querySelectorAll('iframe')).slice(0, 8);
+    frames.forEach((el, i) => el.setAttribute('data-dlc-frame', String(i)));
     return {url: location.href, title: document.title, ready_state: document.readyState,
         viewport: {width: innerWidth, height: innerHeight, device_scale_factor: devicePixelRatio},
         interactive_elements: elements,
         headings: Array.from(document.querySelectorAll('h1,h2,h3')).filter(visible).slice(0,8)
             .map(el => el.innerText.trim().slice(0,120)),
-        main_text: ((document.querySelector('main,article,[role="main"],#content_left') || document.body).innerText || '').slice(0,1200)};
+        main_text: ((document.querySelector('main,article,[role="main"],#content_left') || document.body).innerText || '').slice(0,1200),
+        // A full-viewport iframe is a takeover: even elements this pass did not reach
+        // are unusable, so the page itself has to be reported as blocked. Without it a
+        // captcha is only discovered by clicking something and reading a timeout.
+        page_blocked: (() => {
+            for (const f of frames) {
+                const b = f.getBoundingClientRect();
+                const big = b.width >= innerWidth * 0.6 && b.height >= innerHeight * 0.4;
+                if (big && visible(f)) {
+                    return {kind: 'overlay', element: 'iframe' + (f.src ? ' src=' + f.src.slice(0, 120) : ''),
+                        note: 'A large iframe covers the page. Anything clicked underneath is intercepted; '
+                            + 'identify the iframe before choosing a target.'};
+                }
+            }
+            return null;
+        })()};
 }'''
+
+
+def classify_frame_url(url):
+    """'captcha' when a frame looks like a human-verification widget.
+
+    <p>The URL is the only reliable signal: the blocking error names the iframe but
+    not its purpose, and a widget's own markup lives in a third-party document that
+    cannot be read from here.</p>
+    """
+    lowered = (url or '').lower()
+    return any(host in lowered for host in CAPTCHA_HOSTS)
+
+
+FRAMES = r'''() => Array.from(document.querySelectorAll('iframe')).slice(0, 8).map((el, i) => {
+    el.setAttribute('data-dlc-frame', String(i));
+    const url = el.src || '';
+    return {selector: 'iframe[data-dlc-frame="' + i + '"]', title: el.title, url: url,
+        captcha: /captcha|slidervalid|verify|geetest|nc_|puzzle|baxia|slider|securitycheck/i.test(url)};
+})'''
 
 
 def save_screenshot(page, path):
@@ -86,7 +160,20 @@ def view_page(page, screenshot_path=None):
             info['screenshot_error'] = str(e)[:300]
     info.update(page.evaluate(SNAPSHOT))
     info['tab'] = [p for p in page.context.pages if not p.is_closed()].index(page)
-    info['frames'] = page.evaluate("() => Array.from(document.querySelectorAll('iframe')).slice(0,8).map((el,i) => {el.setAttribute('data-dlc-frame', String(i)); return {selector:'iframe[data-dlc-frame=\"'+i+'\"]',title:el.title,url:el.src};})")
+    info['frames'] = page.evaluate(FRAMES)
+    # A verification widget cannot be clicked through, so the page has to say so
+    # before the model picks a target it can never reach. Overrides the generic
+    # "large iframe" note, which does not tell the model what to do about it.
+    captcha = next((f['url'] for f in info['frames'] if f.get('captcha')), None)
+    if captcha:
+        info['page_blocked'] = {
+            'kind': 'captcha',
+            'element': 'iframe[data-dlc-frame="%d"]' % [f['url'] for f in info['frames']].index(captcha),
+            'url': captcha[:160],
+            'note': 'A CAPTCHA/verification iframe is present on this page. It intercepts clicks on the '
+                    'form underneath and retrying cannot get past it: the user must complete it in the '
+                    'visible browser window, then you re-observe with browser_view and continue. Do not '
+                    'try other refs, other selectors or force clicks.'}
     return info
 
 
@@ -244,6 +331,126 @@ def stop_loading(page):
         pass
 
 
+def clip_error(text, head=KEEP_HEAD, tail=KEEP_TAIL):
+    """Keep both ends of a Playwright error.
+
+    Its call log is chronological and the verdict lands on the last line
+    ("… intercepts pointer events"), so a head-only cut reports the symptom and drops
+    the cause. The tail is what turns "click timed out" into "a captcha is on top of
+    this element", which is the difference between a fixable retry and a dead end.
+    """
+    text = text or ''
+    if len(text) <= head + tail:
+        return text
+    return text[:head] + '\n...[call log trimmed]...\n' + text[-tail:]
+
+
+def snapshot_obstruction(page, target):
+    """Re-read the live page for an element matching `target` that is covered.
+
+    <p>Used when the error text itself did not name a blocker (an unstable or
+    off-screen target produces the same refusal with no element in the log). One DOM
+    round trip, and only on the failure path.</p>
+    """
+    if not target:
+        return None
+    selector = target if target.startswith(('[', '#', '.', 'text=', ':')) \
+        else '[data-dlc-ref="%s"]' % target
+    try:
+        found = page.evaluate(OCCLUDED_PROBE, selector)
+    except Exception:
+        return None
+    return found if isinstance(found, str) and found else None
+
+
+OCCLUDED_PROBE = r'''selector => {
+    const el = document.querySelector(selector);
+    if (!el || !el.getClientRects().length) return null;
+    const box = el.getBoundingClientRect();
+    const x = Math.round(box.x + box.width / 2), y = Math.round(box.y + box.height / 2);
+    let hit = null;
+    try { hit = document.elementFromPoint(x, y); } catch (e) { return null; }
+    if (!hit || hit === el || el.contains(hit) || hit.contains(el)) return null;
+    return hit.tagName.toLowerCase() +
+        (hit.id ? '#' + hit.id : '') +
+        (hit.getAttribute && hit.getAttribute('class') ? '.' + String(hit.getAttribute('class')).trim().split(/\s+/).slice(0, 2).join('.') : '') +
+        (hit.tagName === 'IFRAME' && hit.src ? ' src=' + hit.src.slice(0, 120) : '');
+}'''
+
+
+def interception_reason(error_text):
+    """The element Playwright named as the obstruction, when it named one.
+
+    <p>Parsed out of the error instead of re-queried, because the offender is on top
+    of the target by definition: re-locating it after the fact usually finds nothing.
+    The last such line wins — Playwright logs the blocker again on every retry, and
+    the final one is the element still covering the target when it gave up.</p>
+    """
+    if not error_text:
+        return None
+    lines = [line.strip().lstrip('-').strip() for line in error_text.splitlines()]
+    for line in reversed(lines):
+        if not any(marker in line.lower() for marker in INTERCEPT_MARKERS):
+            continue
+        # "…</iframe> intercepts pointer events" -> keep the element, drop the verdict.
+        element = line[:line.lower().rindex('intercepts')] if 'intercepts' in line.lower() else line
+        element = element.rsplit('</', 1)[0].strip() if '</' in element else element.strip()
+        return re.sub(r'\s+', ' ', element)[:200] or 'an overlapping element'
+    return None
+
+
+class BlockedTarget(Exception):
+    """A refused interaction whose cause is a covering element, not a bad target.
+
+    Carries the obstruction separately from the message so the caller can label the
+    failure (captcha vs ordinary overlay) without re-parsing English prose.
+    """
+
+    def __init__(self, message, blocker, kind):
+        super().__init__(message)
+        self.blocker = blocker
+        self.kind = kind
+
+
+CAPTCHA_ADVICE = ('This is a CAPTCHA/verification overlay. Retrying, switching refs and forcing the click '
+                  'all fail identically, and force-clicking would hit the widget instead of the form. Stop '
+                  'here and tell the user: a verification step on this page needs them to complete it in the '
+                  'visible browser window. Keep the window open, state which step is blocked and what has '
+                  'already been collected, then stop and wait — do not present the remaining data as "not '
+                  'available" when it is only blocked.')
+
+OBSCURED_ADVICE = ('The element exists and is enabled; only the click is blocked. Do not change the ref or '
+                   'the selector — the same obstruction will reject them too. Identify what is on top from '
+                   'the latest screenshot, then either dismiss it (close button / Escape) or work around it '
+                   '(use the frame selector for a widget in an iframe, or reach the same value through a '
+                   'different page).')
+
+
+def obstruction_advice(kind):
+    return CAPTCHA_ADVICE if kind == 'captcha' else OBSCURED_ADVICE
+
+
+def describe_obstruction(page, error_text, act):
+    """Turn a refused interaction into an actionable verdict.
+
+    <p>Without this the raw timeout reaches the model, which reads it as "the page is
+    slow" or "the selector is wrong" and retries. Both are wrong when something is
+    covering the target: the element resolved and is visible, stable and enabled —
+    exactly what the error says — and only the hit test fails. Naming the blocker, and
+    saying that the ref is fine, is what stops the retry loop.</p>
+    """
+    blocker = interception_reason(error_text)
+    target = act.get('ref') or act.get('selector') or act.get('text') or act.get('label') or 'the target'
+    if blocker is None:
+        # No interception in the log, but the element may still be covered — the
+        # snapshot recorded that at observation time and the page may not have moved.
+        blocker = snapshot_obstruction(page, target)
+    if blocker is None:
+        return None
+    kind = 'captcha' if classify_frame_url(blocker) else 'obscured'
+    return {'blocked_by': blocker, 'blocked_kind': kind, 'advice': obstruction_advice(kind)}
+
+
 def settle(page):
     # Long polling/analytics prevent networkidle. Callers can wait/assert the
     # element or URL that actually indicates completion.
@@ -300,6 +507,7 @@ def perform_actions(page, actions, screenshot_path=None):
     validate_actions(actions)
     results = []
     failed_step = None
+    blocked_step = None
     for i, act in enumerate(actions):
         action = act['action']
         step = {'step': i + 1, 'action': action, 'success': True}
@@ -354,6 +562,21 @@ def perform_actions(page, actions, screenshot_path=None):
                     stop_loading(page)
                     raise
             elif action in ('click', 'check', 'uncheck', 'hover'):
+                # Ask the page who is on top before spending the click budget on a
+                # target that cannot be reached. The refusal costs 7s and produces a
+                # timeout the model reads as "slow page" — this costs one round trip
+                # and names the obstruction outright.
+                blocker = snapshot_obstruction(page, act.get('ref') or act.get('selector')
+                                               or act.get('label') or act.get('text') or '')
+                if blocker:
+                    step.update(success=False, blocked_by=blocker[:200],
+                                blocked_kind='captcha' if classify_frame_url(blocker) else 'obscured',
+                                error='%s is covered by %s, so the %s was refused. The element itself '
+                                      'resolved and is visible/enabled — this is an obstruction, not a '
+                                      'bad selector.' % (
+                                          act.get('ref') or act.get('selector') or 'the target',
+                                          blocker[:160], action))
+                    raise BlockedTarget(step['error'], blocker[:200], step['blocked_kind'])
                 getattr(target, action)(timeout=timeout)
             elif action == 'click_xy':
                 viewport = page.evaluate('() => ({width:innerWidth,height:innerHeight})')
@@ -424,8 +647,22 @@ def perform_actions(page, actions, screenshot_path=None):
                                     'did not take effect. Re-observe the page before assuming success.')
             step['url'] = page.url
         except Exception as e:
-            step.update(success=False, error=str(e)[:700])
+            message = clip_error(str(e))
+            if isinstance(e, BlockedTarget):
+                # Refused by the pre-flight probe, so no call log to parse; the
+                # guidance is the same advice a parsed interception would produce.
+                verdict = {'blocked_by': e.blocker, 'blocked_kind': e.kind,
+                           'advice': obstruction_advice(e.kind)}
+            else:
+                # The element may still have been covered when Playwright refused for a
+                # reason it did not spell out (unstable, off-screen, animating). Reading
+                # it here keeps those failures out of the "bad selector" bucket, which is
+                # where a retry loop starts.
+                verdict = describe_obstruction(page, message, act) or {}
+            step.update(success=False, error=message)
+            step.update(verdict)
             failed_step = i + 1
+            blocked_step = verdict or None
         results.append(step)
         if failed_step is not None:
             break  # Never submit after a failed fill.
@@ -433,15 +670,32 @@ def perform_actions(page, actions, screenshot_path=None):
     if failed_step is not None:
         output['error'] = results[-1]['error']
         output['skipped_actions'] = len(actions) - failed_step
+    # Hoisted to the top level: the compaction path keeps a short field list, and the
+    # loop's verdict on "this is not retryable" must survive that without being read
+    # out of a nested actions[] entry.
+    if blocked_step:
+        output['blocked_by'] = blocked_step['blocked_by']
+        output['blocked_kind'] = blocked_step['blocked_kind']
+        output['advice'] = blocked_step['advice']
     try:
         observation = view_page(page, screenshot_path)
         if observation.get('screenshot'):
             output['screenshot'] = observation.pop('screenshot')
         output.update({k: observation[k] for k in ('url','title','tab') if k in observation})
+        if blocked_step and not output.get('blocked_kind'):
+            # The overlay disappeared while we were reporting it; keep what we saw.
+            output['blocked_by'] = blocked_step['blocked_by']
+            output['blocked_kind'] = blocked_step['blocked_kind']
         output['actions'] = results
         output['final'] = observation
+        # Only a failed step may be attributed to a page-level blocker. Doing this
+        # unconditionally labelled a successful click on an uncovered element as
+        # "captcha" just because a widget happened to sit elsewhere on the page.
+        if blocked_step and observation.get('page_blocked') and not output.get('blocked_kind'):
+            output['blocked_by'] = observation['page_blocked'].get('element', blocked_step['blocked_by'])
+            output['blocked_kind'] = observation['page_blocked']['kind']
     except Exception as e:
-        output.update(success=False, actions=results, observation_error=str(e)[:500])
+        output.update(success=False, actions=results, observation_error=clip_error(str(e), 240, 240))
     return output
 
 
@@ -469,7 +723,7 @@ def main():
             # Stop this local driver; preserve the externally owned Chrome.
             return 0 if result['success'] else 1
     except Exception as e:
-        print(json.dumps({'success': False, 'error': str(e)[:1200], 'cdp_url': args.cdp_url}, ensure_ascii=False))
+        print(json.dumps({'success': False, 'error': clip_error(str(e)), 'cdp_url': args.cdp_url}, ensure_ascii=False))
         return 1
 
 

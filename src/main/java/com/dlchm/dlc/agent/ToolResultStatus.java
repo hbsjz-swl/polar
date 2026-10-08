@@ -56,7 +56,11 @@ public final class ToolResultStatus {
             if (root.toString().length() <= max) return root.toString();
             ObjectNode brief = JSON.createObjectNode();
             for (String field : new String[]{"success", "url", "title", "tab", "failed_step", "skipped_actions",
-                    "error", "observation_error", "screenshot", "screenshot_error"}) {
+                    "error", "observation_error", "screenshot", "screenshot_error",
+                    // The obstruction verdict, not the prose around it: this is what
+                    // separates "retry differently" from "hand this to the user", and it
+                    // is small enough to always keep.
+                    "blocked_kind", "blocked_by", "advice"}) {
                 if (root.has(field)) brief.set(field, root.get(field));
             }
             if (root.has("final")) {
@@ -66,10 +70,22 @@ public final class ToolResultStatus {
                 }
             }
             // Limit large error messages/URLs without removing status or image markers.
-            for (String field : new String[]{"error", "observation_error", "url", "title"}) {
+            // Errors keep their tail: a Playwright call log carries its verdict last,
+            // so cutting the end turns "covered by a captcha iframe" into a bare
+            // timeout and the model loses the one actionable fact in the message.
+            for (String field : new String[]{"observation_error", "url", "title"}) {
                 if (brief.path(field).isTextual()) {
                     String text = brief.path(field).asText();
                     brief.put(field, text.substring(0, Math.min(text.length(), max / 5)));
+                }
+            }
+            if (brief.path("error").isTextual()) {
+                String text = brief.path("error").asText();
+                int budget = max / 5;
+                if (text.length() > budget) {
+                    int tail = Math.min(text.length() - (budget * 2 / 3), budget / 3);
+                    brief.put("error", text.substring(0, budget * 2 / 3) + "\n…[中间省略]…\n"
+                            + text.substring(text.length() - tail));
                 }
             }
             if (brief.toString().length() > max) brief.remove("final");

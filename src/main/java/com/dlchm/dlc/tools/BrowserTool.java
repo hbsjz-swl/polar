@@ -207,6 +207,10 @@ public class BrowserTool {
     @Tool(name = "browser_view", description = "Analyze the current page in the browser. "
             + "Returns success, title, URL, tab, viewport, screenshot, actionable element refs, "
             + "headings, iframe selectors and main text content. "
+            + "interactive_elements entries carry obscured=true (and blocked_by) when something covers them: "
+            + "those cannot be clicked right now, so pick another target instead of retrying them. "
+            + "A page_blocked field appears when a large iframe or a CAPTCHA/verification widget covers the page; "
+            + "in the captcha case no click will succeed and the user has to complete it in the visible window. "
             + "Call browser_start first, then use this to understand the page before performing actions.")
     public synchronized String browserView(
             @ToolParam(required = false, description = "Tab index to view (default: 0 = first tab)") Integer tab,
@@ -244,6 +248,13 @@ public class BrowserTool {
             + "Returns success, failed_step, final page observation and screenshot; stops at the first failed action. "
             + "A step may also report narrowed=true (selector matched several elements and was narrowed) "
             + "or no_op=true (URL and page text unchanged, so the click likely did not register - re-observe). "
+            + "If the target was COVERED by another element the result carries blocked_by (what is on top) and "
+            + "blocked_kind:\"obscured\", or blocked_kind:\"captcha\" when a verification widget is gating the page. "
+            + "These are NOT selector errors - the element was found and is usable, so another ref or selector "
+            + "will be refused identically. Do not force the click. For blocked_kind:\"captcha\" the step needs "
+            + "the user: tell them which step is blocked in the visible window, list what is already collected, "
+            + "and wait; browser_view still works to confirm once they have finished it. "
+            + "Observation elements carry obscured=true when something covers them, so do not target those. "
             + "For fill/type/select the value may also be passed as \"text\". "
             + "Actions execute in sequence. The browser stays open after actions complete - "
             + "login state, cookies, and page state are PRESERVED for next call.")

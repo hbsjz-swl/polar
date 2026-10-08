@@ -62,6 +62,23 @@ public class DlcCli {
     private final com.dlchm.dlc.config.DlcProperties properties;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    /**
+     * Cap a console line without dropping the end of it.
+     *
+     * <p>A Playwright call log is chronological and puts its verdict last, so a
+     * head-only cut is what made a captcha interception print as a bare timeout: the
+     * operator saw no cause at all. The marker keeps it obvious that a cut happened.</p>
+     */
+    static String clipDetail(String detail, int max) {
+        if (detail == null || detail.length() <= max) return detail;
+        String marker = "\n…[中间省略]…\n";
+        int tail = Math.min(200, max / 3);
+        // The marker is part of the budget, not an extra: overshooting it is how the
+        // original version quietly stopped bounding the line at all.
+        int head = Math.max(0, max - tail - marker.length());
+        return detail.substring(0, head) + marker + detail.substring(detail.length() - tail);
+    }
+
     private void printToolOutcome(String eventData) {
         try {
             JsonNode event = objectMapper.readTree(eventData);
@@ -78,9 +95,9 @@ public class DlcCli {
                     detail = page.path("title").asText() + " " + page.path("url").asText();
                 }
             } catch (Exception ignored) { }
-            if (detail.length() > 500) detail = detail.substring(0, 500) + "…";
+            String shown = clipDetail(detail, 500);
             System.out.println((failed ? ANSI_YELLOW : ANSI_DIM) + "[tool " + name + "] "
-                    + (failed ? "失败: " : "完成: ") + detail + ANSI_RESET);
+                    + (failed ? "失败: " : "完成: ") + shown + ANSI_RESET);
         } catch (Exception ignored) { }
     }
 

@@ -260,6 +260,7 @@ public final class AgentLoop {
             List<String> failedTools = new ArrayList<>();
             boolean repeatedFailure = false;
             boolean locatorMiss = false;
+            boolean obstructed = false;
             String lastScreenshot = null;
             for (AssistantMessage.ToolCall call : answer.getToolCalls()) {
                 String name = call.name() == null ? "unknown" : call.name();
@@ -311,6 +312,10 @@ public final class AgentLoop {
                 if (match.find()) lastScreenshot = match.group(1).trim();
                 if (failed) {
                     repeatedFailure |= blocked != null;
+                    // Mutually exclusive by construction: locatorMiss() defers to an
+                    // obstruction, so a covered element never also gets told its
+                    // selector was wrong.
+                    obstructed |= ToolFailureGuard.obstructed(result);
                     locatorMiss |= ToolFailureGuard.locatorMiss(result);
                     failedTools.add(name + ": " + limit(result, 500));
                 }
@@ -320,7 +325,13 @@ public final class AgentLoop {
             String escalation = failureGuard.escalateHint();
             if (!failedTools.isEmpty() || escalation != null) {
                 StringBuilder hint = new StringBuilder();
-                if (locatorMiss) {
+                if (obstructed) {
+                    // Checked before locatorMiss on purpose. The element resolved and
+                    // is visible — only the click was refused — so the generic advice
+                    // must not tell the model to abandon refs, which is what used to
+                    // send it round the observation loop against an unclickable page.
+                    hint.append(obstructionHint());
+                } else if (locatorMiss) {
                     // A guessed selector that never resolves is not a tuning problem,
                     // so the generic "try a different step" advice does not help here.
                     hint.append("[系统提示] 定位失败说明这个选择器在页面上不存在或不可见。"
@@ -594,7 +605,7 @@ public final class AgentLoop {
         if (unsourced != null && gateRedrive < MAX_GATE_REDRIVE) {
             return new Redrive(RedriveKind.GATE, unsourcedHint(unsourced));
         }
-        if (failureGuard.exhausted()) return null;
+        if (failureGuard.exhausted() || failureGuard.captchaBlocked()) return null;
         String wrongSite = SiteGate.violation(taskState.lastObservedHost(), text);
         if (wrongSite != null && gateRedrive < MAX_GATE_REDRIVE) {
             String hint = siteHint(wrongSite, taskState.lastObservedHost());
@@ -646,6 +657,24 @@ public final class AgentLoop {
             if (message instanceof UserMessage user && hint.equals(user.getText())) return true;
         }
         return false;
+    }
+
+    /**
+     * Guidance for a click that was refused because something covered the target.
+     *
+     * <p>Names the two things that are true and the one that is not: the element was
+     * found and it is usable, so a new ref is pointless — and the blocker is visible in
+     * the screenshot, so it can be dealt with instead of guessed around. Without this
+     * the model treats the timeout as a page problem and re-observes until the turn
+     * budget is gone.</p>
+     */
+    private static String obstructionHint() {
+        return "[系统提示] 这次点击失败不是选择器问题：元素已经找到、可见且可点，失败原因是它上面有东西挡住了"
+                + "命中测试（blocked_by 字段写明了挡住它的元素）。禁止换 ref、换 selector、换坐标重试，"
+                + "也不要 force 强穿——那只会点到遮挡层本身。先看最新截图确认挡住的是什么："
+                + "若是可关闭的弹层，关掉它或按 Escape 后重试；若是 iframe 里的控件，改用 observation.frames 里的 "
+                + "frame 选择器；若整页被验证码/滑块验证覆盖，那只能由用户在可见窗口里本人完成，"
+                + "按缺凭据的规则停下告知用户，不要继续在此页试探。\n";
     }
 
     /** Correction for a narration that names a site the browser is not on. */
