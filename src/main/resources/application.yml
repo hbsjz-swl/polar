@@ -22,6 +22,13 @@ dlc:
   context-compression-enabled: ${DLC_CONTEXT_COMPRESSION:true}
   vision-enabled: ${DLC_VISION:true}
   max-completion-tokens: ${DLC_MAX_COMPLETION_TOKENS:8192}
+  subagent:
+    enabled: ${DLC_SUBAGENT_ENABLED:true}
+    max-depth: ${DLC_SUBAGENT_MAX_DEPTH:1}
+    max-concurrent: ${DLC_SUBAGENT_MAX_CONCURRENT:4}
+    timeout-seconds: ${DLC_SUBAGENT_TIMEOUT:300}
+    max-timeout-seconds: ${DLC_SUBAGENT_MAX_TIMEOUT:600}
+    max-prompt-chars: ${DLC_SUBAGENT_MAX_PROMPT:32000}
   channels:
     wecom:
       enabled: ${DLC_WECOM_ENABLED:true}

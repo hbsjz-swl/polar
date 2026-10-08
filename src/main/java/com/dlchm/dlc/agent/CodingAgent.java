@@ -59,6 +59,18 @@ public class CodingAgent {
     }
 
     public Flux<StreamEvent> stream(Session session, String userMessage) {
+        return stream(session, userMessage, ExecutionContext.subagentDepth());
+    }
+
+    /**
+     * Runs one turn at an explicit subagent depth.
+     *
+     * <p>The depth has to be captured by the caller and passed in: the turn body
+     * runs on a different thread, so the thread-local in {@link ExecutionContext}
+     * is already gone by then. Reading it inside the scheduled task would always
+     * yield 0 and silently disable the nesting guard.</p>
+     */
+    public Flux<StreamEvent> stream(Session session, String userMessage, int subagentDepth) {
         return Flux.create(sink -> {
             OpenAiChatModel current = model;
             if (!sink.isCancelled()) {
@@ -68,7 +80,7 @@ public class CodingAgent {
             var task = Schedulers.boundedElastic().schedule(() -> {
                 synchronized (session) {
                     try {
-                        ExecutionContext.run(session, 0,
+                        ExecutionContext.run(session, subagentDepth,
                                 () -> loop.run(session, userMessage, sink, current));
                         if (!sink.isCancelled()) {
                             sink.next(new StreamEvent(StreamEvent.Type.TURN_COMPLETED, "{}"));
@@ -90,9 +102,14 @@ public class CodingAgent {
         });
     }
 
+    /** Runs a turn synchronously at the current subagent depth. */
     public String chat(Session session, String userMessage) {
+        return chat(session, userMessage, ExecutionContext.subagentDepth());
+    }
+
+    public String chat(Session session, String userMessage, int subagentDepth) {
         StringBuilder result = new StringBuilder();
-        stream(session, userMessage)
+        stream(session, userMessage, subagentDepth)
                 .doOnNext(event -> {
                     if (event.type() == StreamEvent.Type.TOKEN) result.append(event.data());
                 }).blockLast();

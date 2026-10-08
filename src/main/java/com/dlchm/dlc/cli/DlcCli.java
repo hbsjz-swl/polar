@@ -2,6 +2,7 @@ package com.dlchm.dlc.cli;
 
 import com.dlchm.dlc.agent.CodingAgent;
 import com.dlchm.dlc.agent.ApprovalManager;
+import com.dlchm.dlc.agent.ExecutionContext;
 import com.dlchm.dlc.agent.SubagentManager;
 import com.dlchm.dlc.agent.StreamEvent;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
@@ -10,6 +11,7 @@ import com.dlchm.dlc.session.SessionManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Collectors;
 import org.springframework.ai.tool.ToolCallback;
@@ -37,12 +39,18 @@ public class DlcCli {
               Viliam
             """;
 
-    private static final String ANSI_RESET = "\u001B[0m";
-    private static final String ANSI_CYAN = "\u001B[36m";
-    private static final String ANSI_DIM = "\u001B[2m";
-    private static final String ANSI_ITALIC = "\u001B[3m";
-    private static final String ANSI_GREEN = "\u001B[32m";
-    private static final String ANSI_YELLOW = "\u001B[33m";
+    // Empty strings when the terminal cannot render escapes, so every call site
+    // stays a plain concatenation instead of guarding each print.
+    private static final String ANSI_RESET = AnsiSupport.ansi("0m");
+    private static final String ANSI_CYAN = AnsiSupport.ansi("36m");
+    private static final String ANSI_DIM = AnsiSupport.ansi("2m");
+    private static final String ANSI_ITALIC = AnsiSupport.ansi("3m");
+    private static final String ANSI_GREEN = AnsiSupport.ansi("32m");
+    private static final String ANSI_YELLOW = AnsiSupport.ansi("33m");
+
+    private static String ansi(String code) {
+        return AnsiSupport.ansi(code);
+    }
 
     private final CodingAgent agent;
     private final SandboxPathResolver pathResolver;
@@ -51,6 +59,7 @@ public class DlcCli {
     private final com.dlchm.dlc.tools.MemoryTool memoryTool;
     private final ApprovalManager approvalManager;
     private final SubagentManager subagentManager;
+    private final com.dlchm.dlc.config.DlcProperties properties;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private void printToolOutcome(String eventData) {
@@ -78,7 +87,8 @@ public class DlcCli {
     public DlcCli(CodingAgent agent, SandboxPathResolver pathResolver,
                   ToolCallbackProvider toolCallbackProvider, SessionManager sessionManager,
                   com.dlchm.dlc.tools.MemoryTool memoryTool, ApprovalManager approvalManager,
-                  SubagentManager subagentManager) {
+                  SubagentManager subagentManager,
+                  com.dlchm.dlc.config.DlcProperties properties) {
         this.agent = agent;
         this.pathResolver = pathResolver;
         this.toolCallbackProvider = toolCallbackProvider;
@@ -86,6 +96,7 @@ public class DlcCli {
         this.memoryTool = memoryTool;
         this.approvalManager = approvalManager;
         this.subagentManager = subagentManager;
+        this.properties = properties;
     }
 
     public void run() {
@@ -107,7 +118,7 @@ public class DlcCli {
                      .ifPresent(p -> System.out.println(
                              ANSI_GREEN + p.getFileName() + ": loaded" + ANSI_RESET));
             } catch (Exception ignored) {}
-            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /sessions to list, /resume <id> to resume, /fork to branch, /forget to clear memory, /config to reconfigure." + ANSI_RESET);
+            System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /sessions to list, /resume <id> to resume, /fork to branch, /forget to clear memory, /sub <task> to delegate to a subagent, /config to reconfigure." + ANSI_RESET);
             System.out.println();
 
             while (true) {
@@ -127,7 +138,7 @@ public class DlcCli {
                 }
                 if ("/clear".equalsIgnoreCase(trimmed)) {
                     sessionManager.clear(session.getId());
-                    System.out.print("\033[H\033[2J");
+                    System.out.print(ansi("H") + ansi("2J"));
                     System.out.flush();
                     System.out.println(ANSI_DIM + "History cleared." + ANSI_RESET);
                     continue;
@@ -166,15 +177,36 @@ public class DlcCli {
                     continue;
                 }
                 if ("/agents".equalsIgnoreCase(trimmed)) {
-                    subagentManager.list(session.getId()).forEach(task ->
-                            System.out.println(task.id() + "  " + task.status()
-                                    + "  child=" + task.childSessionId()));
+                    var running = subagentManager.list(session.getId());
+                    if (running.isEmpty()) {
+                        System.out.println(ANSI_DIM + "No subagents for this session."
+                                + (subagentManager.isEnabled() ? "" : " (dlc.subagent.enabled=false)") + ANSI_RESET);
+                    } else {
+                        running.forEach(task ->
+                                System.out.println(task.id() + "  " + task.status()
+                                        + "  depth=" + task.depth()
+                                        + "  child=" + task.childSessionId()));
+                    }
                     continue;
                 }
+                if (trimmed.toLowerCase().startsWith("/sub")) {
+                    if (handleSubCommand(session, trimmed, reader)) continue;
+                }
                 if ("/config".equalsIgnoreCase(trimmed)) {
-                    DlcSetup.reconfigure();
+                    Properties updated = DlcSetup.reconfigure();
                     agent.reloadConfig();
+                    // The tool callback list is fixed at startup, so the switch is
+                    // enforced inside SubagentManager; pushing the values into
+                    // the live bean is what makes it take effect now.
+                    DlcSetup.applyToRuntime(updated, properties);
+                    var sub = properties.getSubagent();
                     System.out.println(ANSI_GREEN + "配置已更新，立即生效。" + ANSI_RESET);
+                    System.out.println(ANSI_DIM + "  子 Agent: "
+                            + (sub.isEnabled() ? "启用" : "停用")
+                            + "  深度上限=" + sub.getMaxDepth()
+                            + "  并发=" + sub.getMaxConcurrent()
+                            + "  超时=" + sub.getTimeoutSeconds() + "s"
+                            + " (硬上限 " + sub.getMaxTimeoutSeconds() + "s)" + ANSI_RESET);
                     continue;
                 }
                 if (trimmed.toLowerCase().startsWith("/install ")) {
@@ -245,7 +277,7 @@ public class DlcCli {
                                 String spin = spinner[thinkCount[0] % spinner.length];
                                 System.out.print("\r" + ANSI_CYAN + "polar> "
                                         + ANSI_DIM + spin + " thinking... (" + elapsed + "s)"
-                                        + ANSI_RESET + "\033[K");
+                                        + ANSI_RESET + ansi("K"));
                                 System.out.flush();
                             } else if (event.type() == StreamEvent.Type.APPROVAL_REQUIRED) {
                                 handleApproval(event.data(), reader);
@@ -260,7 +292,7 @@ public class DlcCli {
                             } else {
                                 if (inReasoning[0]) {
                                     inReasoning[0] = false;
-                                    System.out.print("\r\033[K");
+                                    System.out.print("\r" + ansi("K"));
                                     System.out.print(ANSI_CYAN + "polar> " + ANSI_RESET);
                                 }
                                 System.out.print(event.data());
@@ -269,7 +301,7 @@ public class DlcCli {
                         },
                         error -> {
                             if (inReasoning[0]) {
-                                System.out.print("\r\033[K");
+                                System.out.print("\r" + ansi("K"));
                             }
                             System.out.println();
                             String msg = error.getMessage() != null ? error.getMessage() : "";
@@ -291,7 +323,7 @@ public class DlcCli {
                         },
                         () -> {
                             if (inReasoning[0]) {
-                                System.out.print("\r\033[K");
+                                System.out.print("\r" + ansi("K"));
                                 System.out.print(ANSI_CYAN + "polar> " + ANSI_RESET);
                             }
                             System.out.println();
@@ -310,8 +342,82 @@ public class DlcCli {
         }
     }
 
-    private void handleApproval(String data, LineReader reader) {
-        try {
+    /**
+     * Handles {@code /sub ...}: the manual counterpart to the model's own
+     * delegation.
+     *
+     * <p>Auto-delegation only fires when the model decides a task splits, which
+     * is exactly the case a user knows better than the model does — "run these
+     * three checks in parallel" needs no judgement call. This path bypasses the
+     * model entirely and calls the manager directly, so it also works when the
+     * task is too small for the model to bother decomposing.</p>
+     *
+     * @return true when the input was consumed as a {@code /sub} command
+     */
+    private boolean handleSubCommand(Session session, String input, LineReader reader) {
+        String rest = input.length() > 4 ? input.substring(4).trim() : "";
+        if (rest.isEmpty() || rest.equalsIgnoreCase("help")) {
+            printSubHelp();
+            return true;
+        }
+        if (rest.equalsIgnoreCase("list")) {
+            printSubagents(session.getId());
+            return true;
+        }
+        if (rest.toLowerCase().startsWith("cancel ")) {
+            String id = rest.substring(7).trim();
+            boolean cancelled = subagentManager.cancel(id);
+            System.out.println(cancelled
+                    ? ANSI_GREEN + "已取消子代理 " + id + ANSI_RESET
+                    : ANSI_YELLOW + "无法取消 " + id + "（不存在或已结束）" + ANSI_RESET);
+            return true;
+        }
+        if (!subagentManager.isEnabled()) {
+            System.out.println(ANSI_YELLOW + "子代理已禁用（dlc.subagent.enabled=false）。" + ANSI_RESET);
+            return true;
+        }
+        delegateManually(session, rest, reader);
+        return true;
+    }
+
+    private void printSubHelp() {
+        System.out.println(ANSI_DIM + "  /sub <任务描述>        手动派发一个子代理并等待其总结");
+        System.out.println("  /sub list              列出本会话的子代理");
+        System.out.println("  /sub cancel <id>       取消运行中的子代理");
+        System.out.println();
+        System.out.println(ANSI_DIM + "  提示：子代理没有浏览器工具，也无法请求人工审批；" + ANSI_RESET);
+        System.out.println(ANSI_DIM + "  任务描述需自包含（子代理看不到当前对话）。" + ANSI_RESET);
+    }
+
+    private void printSubagents(String sessionId) {
+        var tasks = subagentManager.list(sessionId);
+        if (tasks.isEmpty()) {
+            System.out.println(ANSI_DIM + "本会话没有子代理记录。" + ANSI_RESET);
+            return;
+        }
+        tasks.forEach(task -> System.out.println(task.id() + "  " + task.status()
+                + "  depth=" + task.depth() + "  child=" + task.childSessionId()));
+    }
+
+    /**
+     * Runs one delegated task on a worker thread and prints the child's summary.
+     *
+     * <p>{@code delegate} is synchronous by design — the model path needs the
+     * answer before it can continue — so the CLI blocks on a thread here rather
+     * than subscribing. Printing before the wait is what keeps a multi-minute
+     * delegation from reading as a hang.</p>
+     */
+    private void delegateManually(Session session, String prompt, LineReader reader) {
+        System.out.println();
+        System.out.println(ANSI_DIM + "子代理已派发（无浏览器权限，无法请求审批），等待结果…" + ANSI_RESET);
+        System.out.flush();
+        // The depth is set for the duration of the call so the manager records a
+        // level-1 task and the child's own delegation stays blocked.
+        ExecutionContext.run(session, 0, () ->
+                System.out.println(subagentManager.delegate(prompt, null)));
+    }
+
+    private void handleApproval(String data, LineReader reader) {        try {
             JsonNode node = objectMapper.readTree(data);
             String id = node.path("approvalId").asText("");
             String summary = node.path("summary").asText("");

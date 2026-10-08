@@ -1,6 +1,7 @@
 package com.dlchm.dlc.agent;
 
 import com.dlchm.dlc.config.DlcProperties;
+import com.dlchm.dlc.sandbox.Platform;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
 import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.session.MarkdownSessionStore;
@@ -141,7 +142,8 @@ public final class AgentLoop {
     }
 
     private void runInternal(Session session, String input, FluxSink<StreamEvent> sink, OpenAiChatModel model) {
-        ToolCallback[] callbacks = toolProvider.getToolCallbacks();
+        int depth = ExecutionContext.subagentDepth();
+        ToolCallback[] callbacks = visibleTools(toolProvider.getToolCallbacks(), depth);
         Map<String, ToolCallback> tools = new HashMap<>();
         for (ToolCallback callback : callbacks) tools.put(callback.getToolDefinition().name(), callback);
         TaskState taskState = session.getTaskState();
@@ -154,6 +156,10 @@ public final class AgentLoop {
                 .replace("{working_dir}", paths.getWorkspaceRoot().toString())
                 .replace("{agent_md}", agentMd == null ? "" : "\n\n## Project Rules\n" + agentMd)
                 .replace("{memory}", limit(memory.loadAllMemory(), 12_000))
+                // The model defaults to POSIX commands and POSIX paths no matter
+                // the host, so it has to be told which conventions apply or it
+                // writes `rm -rf` on Windows and retries variations when it fails.
+                .replace("{platform}", platformBrief())
                 + taskState.render();
         List<Message> messages = new ArrayList<>();
         messages.add(new SystemMessage(system));
@@ -538,6 +544,15 @@ public final class AgentLoop {
 
     private String awaitApproval(ApprovalRequiredException approval, ToolCallback callback,
                                  String rawArguments, String name, FluxSink<StreamEvent> sink) {
+        // A subagent must never block on a human. The approval prompt is only
+        // rendered by the channel that owns the parent session, so a child's
+        // request would wait out the full 10-minute deadline with nobody able to
+        // answer it. Hand the decision back to the parent instead.
+        if (ExecutionContext.subagentDepth() > 0) {
+            return "Error: '" + name + "' needs human approval, which a subagent cannot request. "
+                    + "Do it yourself in the main session, or narrow the delegated task so it "
+                    + "only needs tools that run without approval.";
+        }
         sink.next(new StreamEvent(StreamEvent.Type.APPROVAL_REQUIRED,
                 jsonData(Map.of("approvalId", approval.requestId(),
                         "tool", approval.toolName(), "summary", approval.summary()))));
@@ -642,6 +657,50 @@ public final class AgentLoop {
     }
 
     /** Observation-only subset kept alive after the retry budget is spent. */
+    /**
+     * Filters the tool list down to what this depth is allowed to see.
+     *
+     * <p>A subagent gets the same tools as its parent minus a denylist, for two
+     * concrete reasons. {@code delegate_task} must go or the nesting guard is the
+     * only thing preventing unbounded recursion, and {@code browser_*} must go
+     * because {@link com.dlchm.dlc.tools.BrowserTool} is a singleton holding one
+     * CDP tab — a child navigating away silently yanks the page out from under
+     * the parent mid-task.</p>
+     */
+    /**
+     * The Environment block injected into the system prompt.
+     *
+     * <p>Facts are stated once, here, rather than left implicit: the model's
+     * training is POSIX-heavy, and a command that works on the developer's Mac
+     * silently fails elsewhere. Anything that changes what a valid command looks
+     * like belongs in this block.</p>
+     */
+    private String platformBrief() {
+        Platform platform = Platform.get();
+        return "\n- Platform: " + platform.name() + "\n"
+                + platform.shellHints() + "\n";
+    }
+
+    private ToolCallback[] visibleTools(ToolCallback[] callbacks, int depth) {
+        DlcProperties.SubagentConfig config = properties.getSubagent();
+        if (config == null) return callbacks;
+        // The delegation tool is registered unconditionally so the switch can be
+        // flipped at runtime; hiding it here is what actually stops the model
+        // from calling it while disabled, instead of letting it hit an error.
+        boolean delegateVisible = config.isEnabled() && depth <= 0;
+        List<String> denied = config.getDeniedToolPrefixes();
+        if (depth <= 0 && delegateVisible && (denied == null || denied.isEmpty())) return callbacks;
+        List<ToolCallback> allowed = new ArrayList<>();
+        for (ToolCallback callback : callbacks) {
+            String name = callback.getToolDefinition().name();
+            if (!delegateVisible && "delegate_task".equals(name)) continue;
+            boolean blocked = depth > 0 && denied != null && denied.stream().anyMatch(prefix ->
+                    prefix != null && !prefix.isBlank() && name.startsWith(prefix));
+            if (!blocked) allowed.add(callback);
+        }
+        return allowed.toArray(ToolCallback[]::new);
+    }
+
     private static ToolCallback[] readOnlySubset(ToolCallback[] callbacks, ToolFailureGuard guard) {
         List<ToolCallback> allowed = new ArrayList<>();
         for (ToolCallback callback : callbacks) {

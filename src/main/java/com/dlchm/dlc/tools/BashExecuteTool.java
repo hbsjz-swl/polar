@@ -34,7 +34,13 @@ public class BashExecuteTool {
         this.approvalManager = approvalManager;
     }
 
-    @Tool(name = "bash_execute", description = "Execute a shell command with timeout. Subject to sandbox restrictions.")
+    @Tool(name = "bash_execute", description = """
+            Execute a shell command with a timeout, subject to sandbox restrictions.
+
+            The command runs in the host's shell — bash on macOS and Linux, PowerShell on \
+            Windows — so write it in that syntax. The current platform is stated in the \
+            system prompt under Environment. The working directory is the workspace root, \
+            and the command's exit code is reported back in the result.""")
     public String bashExecute(
             @ToolParam(description = "Shell command to execute") String command,
             @ToolParam(required = false, description = "Timeout in seconds") Integer timeoutOverride) {

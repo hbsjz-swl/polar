@@ -95,6 +95,10 @@ public class AgentConfiguration {
         tools.add(new BashExecuteTool(pathResolver, bashSandbox, truncator, props, approvalManager));
         tools.add(memoryTool);
         tools.add(browserTool);
+        // Always registered: the callback list is built once at startup, so
+        // gating registration on the switch would make `enabled` a boot-time
+        // only setting. SubagentManager refuses the call instead, which is
+        // what makes the toggle work from `/config` without a restart.
         tools.add(new SubagentTool(subagentManager));
         if (skillsTool.hasSkills()) {
             tools.add(skillsTool);

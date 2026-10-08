@@ -10,6 +10,7 @@ import java.nio.channels.FileLock;
 import java.nio.file.StandardOpenOption;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.dlchm.dlc.agent.ExecutionContext;
+import com.dlchm.dlc.sandbox.Platform;
 import com.dlchm.dlc.sandbox.ProcessIsolation;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -173,9 +174,12 @@ public class BrowserTool {
                     + "Close the stuck window manually, then call browser_start.";
         }
         try {
-            if (IS_WINDOWS) {
-                ProcessIsolation.destroyTree(ownedChrome);
-            } else {
+            // destroyTree handles the common case. pkill is the belt-and-braces
+            // path for a Chrome this process lost track of, so its absence must
+            // not abort the restart: a slim container image often has no pkill,
+            // and losing one round of cleanup is better than refusing to recover.
+            ProcessIsolation.destroyTree(ownedChrome);
+            if (!IS_WINDOWS && Platform.findOnPath("pkill") != null) {
                 Process killed = new ProcessBuilder("pkill", "-f", profile.toString())
                         .redirectErrorStream(true).start();
                 killed.waitFor(5, TimeUnit.SECONDS);
@@ -466,28 +470,63 @@ public class BrowserTool {
     }
 
     private String findChromeWindows() {
+        // The three default install locations, then the registry. A machine
+        // where an admin relocated Chrome has none of them, and asking the user
+        // to reinstall the browser is a poor answer when the registry knows.
         String[] paths = {
                 "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
                 "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+                System.getenv("PROGRAMFILES") + "\\Google\\Chrome\\Application\\chrome.exe",
+                System.getenv("PROGRAMFILES(X86)") + "\\Google\\Chrome\\Application\\chrome.exe",
                 System.getenv("LOCALAPPDATA") + "\\Google\\Chrome\\Application\\chrome.exe"
         };
         for (String p : paths) {
             if (p != null && Files.exists(Path.of(p))) return p;
         }
+        String registered = chromePathFromRegistry();
+        if (registered != null) return registered;
+        // Last resort: the launcher is on PATH for some package managers.
+        return Platform.findOnPath("chrome");
+    }
+
+    /**
+     * Reads Chrome's install location from the registry.
+     *
+     * <p>Returns {@code null} on any failure: {@code reg} is absent on a
+     * non-Windows host, the key may not exist, and the output layout varies
+     * between registry views. All three are ordinary, not worth surfacing.</p>
+     */
+    private String chromePathFromRegistry() {
+        try {
+            Process process = new ProcessBuilder("reg", "query",
+                    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
+                    "/ve")
+                    .redirectErrorStream(true).start();
+            if (!process.waitFor(5, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            for (String line : new String(process.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8).split("\\R")) {
+                int at = line.indexOf("REG_");
+                if (at < 0) continue;
+                String value = line.substring(line.indexOf(' ', at)).trim();
+                if (value.toLowerCase().contains("chrome.exe") && Files.exists(Path.of(value))) {
+                    return value;
+                }
+            }
+        } catch (Exception ignored) { }
         return null;
     }
 
     private String findChromeLinux() {
         String[] names = {"google-chrome", "google-chrome-stable", "chromium-browser", "chromium"};
         for (String name : names) {
-            try {
-                Process p = new ProcessBuilder("which", name)
-                        .redirectErrorStream(true).start();
-                if (p.waitFor(3, TimeUnit.SECONDS) && p.exitValue() == 0) {
-                    return name;
-                }
-            } catch (Exception ignored) {
-            }
+            // Scanning PATH beats shelling out to `which` once per candidate:
+            // four process launches on a path that is usually present or absent
+            // entirely, and `which` does not exist on a slim container image.
+            String found = Platform.findOnPath(name);
+            if (found != null) return found;
         }
         return "google-chrome";
     }

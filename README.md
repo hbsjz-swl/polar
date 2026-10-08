@@ -114,7 +114,8 @@ polar
 
 - 直接回车使用默认值（通义千问）
 - API Key 输入时不显示明文
-- 配置保存在 `~/.dlc/config.properties`，下次启动自动加载
+- 向导还会询问子 Agent 的开关与限值，每项都带中文说明
+- 配置保存在 `~/.dlc/config.properties`（每个参数旁都有中文注释），下次启动自动加载
 - API Key 失效时会自动检测并提示重新配置
 
 ### 常用 API 配置
@@ -130,13 +131,19 @@ polar
 
 | 命令 | 说明 |
 |------|------|
-| `/config` | 重新配置 API 连接 |
+| `/config` | 重新配置 API 连接与子 Agent，立即生效 |
 | `/clear` | 清屏并清除对话历史 |
 | `/sessions` | 列出本地已持久化的会话 |
 | `/resume <id>` | 恢复指定会话 |
 | `/fork` | 从当前会话创建一个独立分支 |
 | `/status` | 查看当前会话、活跃会话和审批状态 |
-| `/agents` | 查看当前会话的子 Agent 任务 |
+| `/sub <任务描述>` | 手动派发一个子 Agent 并等待其总结 |
+| `/sub list` | 查看当前会话的子 Agent 任务（含运行中） |
+| `/sub cancel <id>` | 取消运行中的子 Agent |
+| `/agents` | 子 Agent 任务列表（`/sub list` 的别名） |
+| `/skills` | 列出已安装的技能 |
+| `/install <名称>` | 从 ClawHub 安装技能 |
+| `/uninstall <名称>` | 卸载技能 |
 | `/quit` 或 `/exit` | 退出 |
 | `/forget` | 清除所有记忆 |
 
@@ -162,6 +169,33 @@ polar
 所有命令都以工作区为当前目录，并在 macOS 的 Seatbelt 或 Linux 的 bubblewrap 可用时
 启用原生写入隔离；其他系统仍使用工作区路径策略。超时会递归终止子进程树，避免后台
 进程泄漏。
+
+高风险命令的判定同时覆盖 POSIX 与 PowerShell 两种写法：`rm -rf /`、
+`Remove-Item -Recurse -Force C:\`、`del /s /q C:\`、`format C:`、`diskpart`
+一律直接拒绝；`rm`、`del`、`Remove-Item`、`sudo`、`git push --force` 等会暂停
+等待确认。匹配会扫描整行而不是只看开头，所以 `echo hi && rm -rf ~/x` 同样会被拦下。
+
+> **Windows 没有内核级沙箱。** 系统不提供 Seatbelt 等价物，因此命令只受工作区
+> 路径检查约束，不受内核隔离。如果沙箱不可用（例如容器环境，或 macOS 上
+> `sandbox-exec` 被限制），DLC 会在第一次执行命令时打印一行警告，说明此时的实际
+> 保护级别。请勿在这种情况下执行不可信命令。
+
+### 跨平台行为差异
+
+DLC 在 macOS、Linux、Windows 上都能运行，但有几处刻意的差异：
+
+| 项目 | macOS / Linux | Windows |
+|------|---------------|---------|
+| 命令解释器 | `bash -c` | `powershell.exe -NoProfile -NonInteractive -Command` |
+| 退出码 | shell 原生返回 | 追加 `; exit $LASTEXITCODE` 显式回传（PowerShell 不继承原生命令的退出码，否则失败的构建会被当成成功） |
+| 原生沙箱 | Seatbelt / bubblewrap | 无，仅工作区路径检查 |
+| 浏览器查找 | 应用路径 / `PATH` 扫描 | 三处默认安装路径 + 注册表 `App Paths` + `PATH` |
+| 终端颜色 | 始终启用 | 依赖控制台能力，`NO_COLOR` 或旧版 `cmd.exe` 自动降级为纯文本 |
+| 路径分隔符 | `/` | `\` |
+
+当前平台的名称、shell 语法和替换写法会**注入系统提示词**，模型会据此生成对应
+shell 的命令，而不是默认写 POSIX 语法。因此在 Windows 上它用的是
+`Remove-Item` 而不是 `rm -rf`，用 `;` 而不是 `&&` 串联命令。
 
 审批接口：
 
@@ -190,9 +224,129 @@ cat task.txt | polar exec --jsonl
 
 ### 子 Agent
 
-模型可通过 `delegate_task` 将独立、可复核的任务交给子 Agent。子 Agent 使用新的会话，
-受并发数、最大深度和超时限制，结果以工具输出回传；可以通过 `/agents` 或
-`GET /api/session/{id}/agents` 查看，并使用 `POST /api/agent/{taskId}/cancel` 取消。
+子 Agent（subagent）用一个**独立会话**跑一段封闭任务，跑完只把最终总结回传给主会话。
+它不共享主会话的历史，因此适合"互不依赖的并行块"——分头审几个文件、并行查几个主题、
+分别定位几个独立故障。
+
+子 Agent 有两种触发方式：**模型自动委派**和**用户手动派发**。
+
+#### 触发方式一：模型自动委派
+
+`delegate_task` 工具常驻工具集。任务能拆成 2 个以上互不依赖的块时，模型会自行委派，
+你不需要做任何事。也可以在提问时直接要求：
+
+```
+请用 delegate_task 委派两个独立子任务，一个查 a.txt，一个查 b.txt，并行跑完后汇总。
+```
+
+#### 触发方式二：用户手动派发（`/sub`）
+
+`/sub` **绕过模型**直接派发，适合任务本身就是一组独立子任务、但模型可能觉得
+"不值得拆"的情况（比如"把这 5 个接口的文档各抓一份"）。
+
+| 命令 | 说明 |
+|------|------|
+| `/sub <任务描述>` | 派发一个子 Agent，阻塞等待其总结后打印结果 |
+| `/sub` 或 `/sub help` | 查看帮助与限制说明 |
+| `/sub list` | 列出本会话的子 Agent 任务，含 `running` 状态 |
+| `/sub cancel <id>` | 取消运行中的子 Agent |
+
+```
+you> /sub 请读取 src/main/java/com/example/OrderService.java，列出所有吞掉异常的
+      catch 分支，输出 文件:行号 列表，不要改代码。
+
+子代理已派发（无浏览器权限，无法请求审批），等待结果…
+Subagent 7f3c1a20-9b4e-4c8d-a1f2-5e6d7c8b9a01 completed:
+  OrderService.java:88  (catch (Exception e) { })
+  OrderService.java:142 (catch (Throwable t) { return; })
+
+you> /sub list
+7f3c1a20-9b4e-4c8d-a1f2-5e6d7c8b9a01  completed  depth=1  child=b2c3d4e5-...
+```
+
+`/agents` 是 `/sub list` 的别名，两者输出相同。
+
+> **注意**：`/sub` 是阻塞命令，**必须等它打印出结果才会回到 `you>` 提示符**，
+> 期间无法输入 `/sub cancel`。要取消一个正在跑的子代理，有两个办法：
+> 用 `Ctrl+C` 中断当前命令，或改用 HTTP 接口从另一个终端取消
+> （`POST /api/agent/{taskId}/cancel`）。这一点与 `/sub` 的同步语义有关，
+> 不是缺陷——模型通过 `delegate_task` 委派时同样是阻塞等待的。
+
+#### 任务描述必须自包含
+
+子 Agent 是**空白上下文**：它看不到当前对话、看不到你的原始表述、也看不到主 Agent
+已经查到的任何东西。路径、事实、约束、期望输出格式都要在描述里重述一遍。
+
+- 没用：`/sub 去查一下刚才那个问题` —— 子 Agent 不知道"刚才"是什么
+- 有用：`/sub 读取 /abs/path/a.txt，统计以 ERROR 开头的行数，只回复一个数字`
+
+#### 限制
+
+- **无浏览器权限**：`browser_*` 工具不对子 Agent 开放。`BrowserTool` 是单例、只持有
+  一个 CDP 标签页，子 Agent 一导航就会把主 Agent 正在看的页面抽走。需要浏览器的
+  步骤请留在主会话。
+- **无法请求人工审批**：子 Agent 触发审批时会立即被拒绝（审批提示只由持有主会话的
+  渠道渲染，子 Agent 等下去只会空耗到超时）。需要审批的命令请在主会话执行。
+- **不能再往下派**：`max-depth` 默认为 1，即子 Agent 不能派孙 Agent。
+- **同步阻塞**：调用会一直等到子 Agent 返回或超时。超时或失败会返回明确原因，
+  原样重试同一个描述没有意义。
+
+#### 配置
+
+有三层，优先级从低到高：`application.yml` 默认值 < `~/.dlc/config.properties` < 环境变量。
+
+`/config` 命令可以交互式配置模型连接和子 Agent，**改完立即生效，不用重启**：
+
+```
+you> /config
+
+  ── 子 Agent（Sub Agent）──
+  子 Agent 还能继续派发几层。1 = 子 Agent 不能再往下派；不建议调高，递归委派会迅速失控
+  最大嵌套深度 (整数) [1]: 2
+```
+
+向导里的每一项都带中文说明，落盘时也会写进 `~/.dlc/config.properties`：
+
+```properties
+# 子 Agent 还能继续派发几层。1 = 子 Agent 不能再往下派；不建议调高，递归委派会迅速失控
+# 默认值：1
+subagent-max-depth=2
+```
+
+也可以用环境变量调整（同样可写入 `application.yml` 的 `dlc.subagent.*`）：
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `DLC_SUBAGENT_ENABLED` | `true` | 设为 `false` 则不向模型暴露 `delegate_task`，`/sub` 也会拒绝 |
+| `DLC_SUBAGENT_MAX_DEPTH` | `1` | 最大嵌套深度，1 表示子 Agent 不能继续派发 |
+| `DLC_SUBAGENT_MAX_CONCURRENT` | `4` | 同时运行的子 Agent 上限 |
+| `DLC_SUBAGENT_TIMEOUT` | `300` | 默认超时秒数 |
+| `DLC_SUBAGENT_MAX_TIMEOUT` | `600` | 超时硬上限，防止入参传入超大值占死线程池 |
+| `DLC_SUBAGENT_MAX_PROMPT` | `32000` | 单次任务描述的最大字符数 |
+
+```bash
+# 彻底关闭子 Agent
+DLC_SUBAGENT_ENABLED=false polar
+
+# 放宽并发和超时
+DLC_SUBAGENT_MAX_CONCURRENT=8 DLC_SUBAGENT_TIMEOUT=600 polar
+```
+
+`enabled` 和 `max-concurrent` 都在**每次调用时**读取，所以 `/config` 里改完立刻影响下一次委派：
+关掉开关后模型再也看不到 `delegate_task`（不会去调一个必然失败的工具），调高并发后正在排队的
+子 Agent 会被立即放行。`max-depth` 与两个超时同理。
+
+#### HTTP 接口
+
+```text
+GET  /api/session/{id}/agents        列出指定会话的子 Agent 任务
+POST /api/agent/{taskId}/cancel      取消指定任务
+```
+
+```bash
+curl -s localhost:19869/api/session/cli/agents
+curl -s -XPOST localhost:19869/api/agent/7f3c1a20-9b4e-4c8d-a1f2-5e6d7c8b9a01/cancel
+```
 
 ### HTTP / WebSocket
 

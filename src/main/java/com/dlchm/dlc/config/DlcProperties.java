@@ -37,6 +37,54 @@ public class DlcProperties {
     /** 单次 API 调用最大 completion tokens（0 表示不设置，使用 API 默认值） */
     private int maxCompletionTokens = 8192;
 
+    /** Subagent 配置 */
+    private SubagentConfig subagent = new SubagentConfig();
+
+    public SubagentConfig getSubagent() { return subagent; }
+    public void setSubagent(SubagentConfig subagent) { this.subagent = subagent; }
+
+    /**
+     * Subagent（子代理委派）配置。
+     *
+     * <p>子代理跑在独立会话里，共享父代理的工具集但不共享历史。默认开启，
+     * 因为它是把「大任务拆成互不依赖的并行块」的唯一手段。</p>
+     */
+    public static class SubagentConfig {
+        /** 是否启用 delegate_task 工具 */
+        private boolean enabled = true;
+        /** 最大嵌套深度：1 = 只允许父代理派子代理，子代理不能再派 */
+        private int maxDepth = 1;
+        /** 同时运行的子代理上限 */
+        private int maxConcurrent = 4;
+        /** 子代理默认超时（秒），实际取 min(入参, maxTimeoutSeconds) */
+        private int timeoutSeconds = 300;
+        /** 硬上限（秒），防止入参传入超大值把线程池占死 */
+        private int maxTimeoutSeconds = 600;
+        /** 单次委派 prompt 的最大字符数 */
+        private int maxPromptChars = 32000;
+        /**
+         * 子代理可用的工具名前缀黑名单。
+         * browser_* 会与父代理争抢同一个 CDP 标签页，delegate_task 会让嵌套深度失控。
+         */
+        private List<String> deniedToolPrefixes = new ArrayList<>(
+                List.of("browser_", "delegate_task"));
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getMaxDepth() { return maxDepth; }
+        public void setMaxDepth(int maxDepth) { this.maxDepth = maxDepth; }
+        public int getMaxConcurrent() { return maxConcurrent; }
+        public void setMaxConcurrent(int maxConcurrent) { this.maxConcurrent = maxConcurrent; }
+        public int getTimeoutSeconds() { return timeoutSeconds; }
+        public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
+        public int getMaxTimeoutSeconds() { return maxTimeoutSeconds; }
+        public void setMaxTimeoutSeconds(int maxTimeoutSeconds) { this.maxTimeoutSeconds = maxTimeoutSeconds; }
+        public int getMaxPromptChars() { return maxPromptChars; }
+        public void setMaxPromptChars(int maxPromptChars) { this.maxPromptChars = maxPromptChars; }
+        public List<String> getDeniedToolPrefixes() { return deniedToolPrefixes; }
+        public void setDeniedToolPrefixes(List<String> deniedToolPrefixes) { this.deniedToolPrefixes = deniedToolPrefixes; }
+    }
+
     /** Channels 配置 */
     private ChannelsConfig channels = new ChannelsConfig();
 
