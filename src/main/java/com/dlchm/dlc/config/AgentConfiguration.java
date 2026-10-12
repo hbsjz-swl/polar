@@ -2,6 +2,8 @@ package com.dlchm.dlc.config;
 
 import com.dlchm.dlc.sandbox.BashCommandSandbox;
 import com.dlchm.dlc.sandbox.SandboxPathResolver;
+import com.dlchm.dlc.agent.ObservingToolCallbackProvider;
+import com.dlchm.dlc.agent.ToolCallTimingListener;
 import com.dlchm.dlc.tools.BashExecuteTool;
 import com.dlchm.dlc.tools.EditFileTool;
 import com.dlchm.dlc.tools.GlobSearchTool;
@@ -103,9 +105,13 @@ public class AgentConfiguration {
         if (skillsTool.hasSkills()) {
             tools.add(skillsTool);
         }
-        return MethodToolCallbackProvider.builder()
+        // Wrapped rather than built in: the callbacks are produced by the provider, so
+        // the timing listener has to decorate them afterwards. Doing it inside each
+        // tool would mean touching every one and keeping that code in sync.
+        ToolCallbackProvider provider = MethodToolCallbackProvider.builder()
                 .toolObjects(tools.toArray())
                 .build();
+        return new ObservingToolCallbackProvider(provider, new ToolCallTimingListener());
     }
 
     /**

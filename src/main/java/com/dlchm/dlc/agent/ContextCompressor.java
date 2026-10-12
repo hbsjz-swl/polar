@@ -21,16 +21,43 @@ public final class ContextCompressor {
     private static final Logger log = LoggerFactory.getLogger(ContextCompressor.class);
     private static final int MAX_SUMMARY_INPUT_CHARS = 24_000;
     private static final int MAX_SUMMARY_CHARS = 2_400;
+    /**
+     * Ceiling applied to the configured window.
+     *
+     * <p>Was 32_768, which silently turned a 512K-token model into a 32K one: with a
+     * 0.70 ratio the turn compacted at ~23K tokens no matter how much context the model
+     * could actually hold, and every long task (multi-line flight search, repeated
+     * browser queries) re-compacted every few steps.</p>
+     *
+     * <p>Now above every window in current use (1M), so the configured value passes
+     * through untouched and the ceiling only exists to bound a value that is
+     * nonsensical rather than merely large — otherwise a typo like 20000000 would
+     * compact far too late and overflow the model.</p>
+     */
+    private static final int MAX_WINDOW_CEILING = 1_048_576;
+    /** Compaction fires once the estimate passes this fraction of the effective window. */
+    private static final double COMPACTION_RATIO = 0.75;
     private final AgnesRequestRateLimiter rateLimiter;
 
     public ContextCompressor(AgnesRequestRateLimiter rateLimiter) {
         this.rateLimiter = rateLimiter;
     }
 
+    /**
+     * The token count at which compaction fires, derived from the configured window.
+     *
+     * <p>Exposed (package-private) so the ceiling and ratio are testable without
+     * building a full message list: the whole regression was one constant that no test
+     * could see.</p>
+     */
+    static int compactionThreshold(int configuredWindow) {
+        int budget = Math.max(2_048, Math.min(configuredWindow, MAX_WINDOW_CEILING));
+        return (int) (budget * COMPACTION_RATIO);
+    }
+
     public boolean compressIfNeeded(List<Message> messages, ToolCallback[] tools, int configuredWindow,
                                     OpenAiChatModel model) {
-        int budget = Math.max(2_048, Math.min(configuredWindow, 32_768));
-        int threshold = (int) (budget * 0.70);
+        int threshold = compactionThreshold(configuredWindow);
         if (estimate(messages, tools) <= threshold) return false;
         boolean changed = false;
 

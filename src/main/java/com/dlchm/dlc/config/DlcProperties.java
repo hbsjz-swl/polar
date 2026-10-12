@@ -37,6 +37,15 @@ public class DlcProperties {
     /** 单次 API 调用最大 completion tokens（0 表示不设置，使用 API 默认值） */
     private int maxCompletionTokens = 8192;
 
+    /**
+     * 单回合最大墙钟时长（秒）。0 = 不限制。
+     * 到达后于下一次迭代边界协作式停止（见 TurnGuard），不会打断正在执行的工具。
+     */
+    private int turnMaxDurationSeconds = 0;
+
+    /** 单回合工具调用次数上限。0 = 不限制。 */
+    private int turnMaxToolCalls = 0;
+
     /** Subagent 配置 */
     private SubagentConfig subagent = new SubagentConfig();
 
@@ -106,6 +115,10 @@ public class DlcProperties {
     public void setVisionEnabled(boolean visionEnabled) { this.visionEnabled = visionEnabled; }
     public int getMaxCompletionTokens() { return maxCompletionTokens; }
     public void setMaxCompletionTokens(int maxCompletionTokens) { this.maxCompletionTokens = maxCompletionTokens; }
+    public int getTurnMaxDurationSeconds() { return turnMaxDurationSeconds; }
+    public void setTurnMaxDurationSeconds(int seconds) { this.turnMaxDurationSeconds = seconds; }
+    public int getTurnMaxToolCalls() { return turnMaxToolCalls; }
+    public void setTurnMaxToolCalls(int calls) { this.turnMaxToolCalls = calls; }
     public ChannelsConfig getChannels() { return channels; }
     public void setChannels(ChannelsConfig channels) { this.channels = channels; }
 

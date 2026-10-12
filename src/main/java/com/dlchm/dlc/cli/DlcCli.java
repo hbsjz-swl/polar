@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
@@ -25,6 +26,7 @@ import org.jline.terminal.TerminalBuilder;
 import org.springframework.stereotype.Component;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import reactor.core.Disposable;
 
 /**
  * 终端交互界面。
@@ -61,6 +63,14 @@ public class DlcCli {
     private final SubagentManager subagentManager;
     private final com.dlchm.dlc.config.DlcProperties properties;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * The live terminal, kept so a running turn can be steered from another thread.
+     *
+     * <p>Null before {@link #run()} opens it (and for non-interactive callers), which
+     * turns steering off rather than failing the turn.</p>
+     */
+    private volatile Terminal terminal;
 
     /**
      * Cap a console line without dropping the end of it.
@@ -117,8 +127,9 @@ public class DlcCli {
     }
 
     public void run() {
-        try (Terminal terminal = TerminalBuilder.builder().system(true).build()) {
-            LineReader reader = LineReaderBuilder.builder().terminal(terminal).build();
+        try (Terminal open = TerminalBuilder.builder().system(true).build()) {
+            this.terminal = open;
+            LineReader reader = LineReaderBuilder.builder().terminal(open).build();
             Session session = sessionManager.getCliSession();
 
             System.out.println(ANSI_CYAN + BANNER + ANSI_RESET);
@@ -136,6 +147,7 @@ public class DlcCli {
                              ANSI_GREEN + p.getFileName() + ": loaded" + ANSI_RESET));
             } catch (Exception ignored) {}
             System.out.println(ANSI_DIM + "Type your request. /quit to exit, /clear to clear, /sessions to list, /resume <id> to resume, /fork to branch, /forget to clear memory, /sub <task> to delegate to a subagent, /config to reconfigure." + ANSI_RESET);
+            System.out.println(ANSI_DIM + "While a task runs: press ESC to stop it, or type a message and press Enter to queue it for the next turn." + ANSI_RESET);
             System.out.println();
 
             while (true) {
@@ -274,7 +286,15 @@ public class DlcCli {
         String[] usageInfo = {null};
         String[] spinner = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
 
-        agent.stream(session, userMessage)
+        // Reads the keyboard while the turn runs: ESC stops it, and anything typed
+        // plus Enter is queued as the next message. Started before the subscription so
+        // a keystroke during the very first token is not missed.
+        TurnInputWatcher watcher = terminal == null ? null : new TurnInputWatcher(terminal);
+        if (watcher != null) watcher.start();
+        Disposable[] subscription = {null};
+
+        try {
+        subscription[0] = agent.stream(session, userMessage)
                 .subscribe(
                         event -> {
                             if (event.type() == StreamEvent.Type.TURN_STARTED
@@ -352,10 +372,32 @@ public class DlcCli {
                         }
                 );
 
-        try {
-            latch.await();
+        // Polled rather than awaited outright: ESC only sets a flag on the watcher
+        // thread, and the main thread has to notice it and dispose the subscription.
+        // Disposing is what cancels the turn — the loop polls sink.isCancelled()
+        // between iterations and unwinds at a safe boundary.
+        while (latch.getCount() > 0) {
+            if (watcher != null && watcher.isCancelled()) {
+                System.out.println();
+                System.out.println(ANSI_YELLOW + "已中断本轮执行。" + ANSI_RESET);
+                if (subscription[0] != null) subscription[0].dispose();
+                break;
+            }
+            if (latch.await(100, TimeUnit.MILLISECONDS)) break;
+        }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        } finally {
+            if (watcher != null) watcher.stop();
+        }
+
+        // Anything typed while the turn ran is fed back in, so a constraint added
+        // mid-flight ("只要高铁") is applied to the next turn instead of being lost.
+        if (watcher != null) {
+            for (String queued : watcher.drainPending()) {
+                System.out.println(ANSI_DIM + "(已排队) " + queued + ANSI_RESET);
+                processMessage(session, queued, reader);
+            }
         }
     }
 

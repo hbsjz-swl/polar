@@ -51,7 +51,16 @@ public final class AgentLoop {
     private static final Logger log = LoggerFactory.getLogger(AgentLoop.class);
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final Pattern SCREENSHOT = Pattern.compile("\\[SCREENSHOT:([^\\]]+)]");
-    private static final int MAX_ITERATIONS = 100;
+    /**
+     * Model requests allowed in one turn.
+     *
+     * <p>30 for a desktop client, not the 100 an enterprise harness can afford: each
+     * iteration is a model round trip plus however many tools it dispatches, so a
+     * runaway turn on a client holds the UI open for minutes. The budget is stated in
+     * the system prompt every round (see {@link GoalContract}) so the model can plan
+     * its remaining calls and finish early instead of being cut off.</p>
+     */
+    private static final int MAX_ITERATIONS = 30;
     private static final int MAX_USER_CHARS = 32_000;
     private static final int MAX_TOOL_RESULT_CHARS = 4_000;
     private static final int MAX_HISTORY_RESULT_CHARS = 800;
@@ -160,6 +169,10 @@ public final class AgentLoop {
                 // the host, so it has to be told which conventions apply or it
                 // writes `rm -rf` on Windows and retries variations when it fails.
                 .replace("{platform}", platformBrief())
+                // How to declare the goal finished or blocked. Part of the base
+                // template rather than the per-round contract, because it is an output
+                // rule that holds for every turn, not a restatement of this goal.
+                + GoalCompletion.instruction()
                 + taskState.render();
         List<Message> messages = new ArrayList<>();
         messages.add(new SystemMessage(system));
@@ -179,8 +192,21 @@ public final class AgentLoop {
         int sameUrlStreak = 0;
         Set<String> stallAdvised = new HashSet<>();
         ToolFailureGuard failureGuard = new ToolFailureGuard();
+        // Cooperative stop: the loop only unwinds between iterations, where the
+        // transcript is at a message boundary. Mid-tool-call it would strand a tool
+        // call the next request cannot replay.
+        TurnGuard turnGuard = TurnGuard.ofSeconds(properties.getTurnMaxDurationSeconds(),
+                properties.getTurnMaxToolCalls()).start();
         for (int step = 0; step < MAX_ITERATIONS; step++) {
             if (sink.isCancelled()) return;
+            String turnViolation = turnGuard.violation();
+            if (turnViolation != null) {
+                // Not a failure: the turn is cut short by its own budget, so say so
+                // plainly instead of letting it read as a model error.
+                sink.next(new StreamEvent(StreamEvent.Type.CANCELLED, turnViolation));
+                persist(session, messages);
+                return;
+            }
             if (properties.isContextCompressionEnabled()
                     && compressor.compressIfNeeded(messages, callbacks,
                     properties.getContextWindowTokens(), model)) {
@@ -191,10 +217,21 @@ public final class AgentLoop {
             // report the true state instead of guessing.
             ToolCallback[] active = failureGuard.exhausted()
                     ? readOnlySubset(callbacks, failureGuard) : callbacks;
+            // The goal and the live budget are re-rendered every iteration: history
+            // replay preserves neither, and the compressor rewrites messages[1..]
+            // wholesale. Injecting once at the start loses the goal by iteration three,
+            // which is when a long task starts drifting toward the last tool result.
+            // `system` is the pristine template, so it never already carries the marker.
+            String systemWithGoal = system
+                    + new GoalContract(input, MAX_ITERATIONS).render(step, turnGuard.toolCallsUsed());
             var options = model.getOptions().mutate()
                     .toolCallbacks(List.of(active)).build();
             Prompt prompt = new Prompt(textReplayRequired
                     ? textReplay(messages) : List.copyOf(messages), options);
+            // Replace the system message with the goal-annotated copy for this request
+            // only; the transcript keeps the unannotated original so the contract is
+            // never persisted twice.
+            prompt = withSystem(prompt, systemWithGoal);
             ChatResponse response;
             try {
                 response = streamResponse(model, prompt, sink);
@@ -222,6 +259,12 @@ public final class AgentLoop {
             AssistantMessage answer = response.getResult().getOutput();
             String text = answer.getText() == null ? "" : answer.getText();
             if (!response.hasToolCalls()) {
+                // Strip the protocol markers before they reach the transcript: they are
+                // how the loop reads the verdict, not part of the answer the user reads.
+                String visible = GoalCompletion.strip(text);
+                if (!visible.equals(text)) {
+                    answer = new AssistantMessage(visible);
+                }
                 messages.add(answer);
                 persist(session, messages);
                 if (usage.hasData()) sink.next(new StreamEvent(StreamEvent.Type.USAGE, usage.toString()));
@@ -301,6 +344,7 @@ public final class AgentLoop {
                 }
                 boolean failed = ToolResultStatus.failed(result);
                 failureGuard.record(name, call.arguments(), result);
+                turnGuard.recordToolCalls(1);
                 result = limitToolResult(result, MAX_TOOL_RESULT_CHARS);
                 sink.next(new StreamEvent(StreamEvent.Type.TOOL_OUTPUT,
                         jsonData(Map.of("id", call.id(), "name", name, "result", result))));
@@ -611,6 +655,15 @@ public final class AgentLoop {
             String hint = siteHint(wrongSite, taskState.lastObservedHost());
             if (!alreadyAdvised(messages, hint)) return new Redrive(RedriveKind.GATE, hint);
         }
+        // An explicit declaration outranks everything below: the model said the goal is
+        // done, or said it is blocked on the user. Both are answers, not stalls.
+        GoalCompletion.Verdict verdict = GoalCompletion.verdict(text);
+        if (verdict == GoalCompletion.Verdict.DONE) return null;
+        if (verdict == GoalCompletion.Verdict.BLOCKED) {
+            // Blocked on the user is the one stop the goal-completion rule allows, so
+            // do not push it back into the loop with "don't stop to ask".
+            return null;
+        }
         // Uses its own budget: an earlier gate redrive must not consume the slot
         // that stops the model from ending the turn with "要不要我继续".
         // Only a turn that has not yet delivered anything can be "stalling": once
@@ -618,6 +671,11 @@ public final class AgentLoop {
         // an offer. Re-driving it promotes that offer into mandatory extra work the
         // user never asked for — which is exactly how one run spent ten calls
         // chasing a rail-fare lookup nobody requested.
+        //
+        // This is the fallback path, reached only when the model declared nothing.
+        // Reading prose for a stall mis-fires in both directions (a polite question
+        // after a finished answer, or a stall phrased unusually), which is why the
+        // explicit marker above is checked first.
         if (toolExecuted && autoContinue < MAX_AUTO_CONTINUE
                 && AnswerGate.citedEvidenceCount(taskState, text) < 2
                 && ASK_TO_CONTINUE.matcher(text).find() && NEXT_STEP.matcher(text).find()) {
@@ -628,6 +686,24 @@ public final class AgentLoop {
                             + "也不要把你自己临时提出的额外可选项（例如用户没有要求补查的数据）当成新任务去做。");
         }
         return null;
+    }
+
+    /**
+     * Swaps in an annotated system message for this request only.
+     *
+     * <p>The transcript keeps the pristine system message so the goal contract is never
+     * persisted — replaying it would duplicate the goal on every subsequent turn.</p>
+     */
+    private static Prompt withSystem(Prompt prompt, String system) {
+        List<Message> messages = new ArrayList<>(prompt.getInstructions());
+        for (int i = 0; i < messages.size(); i++) {
+            if (messages.get(i) instanceof SystemMessage) {
+                messages.set(i, new SystemMessage(system));
+                return new Prompt(messages, prompt.getOptions());
+            }
+        }
+        messages.add(0, new SystemMessage(system));
+        return new Prompt(messages, prompt.getOptions());
     }
 
     /** Which budget a re-drive spends; see the two MAX_* constants. */

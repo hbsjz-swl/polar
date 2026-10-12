@@ -18,10 +18,19 @@ dlc:
   permission-mode: ${DLC_PERMISSION_MODE:STANDARD}
   bash-timeout-seconds: ${DLC_BASH_TIMEOUT:30}
   max-tool-output-chars: ${DLC_MAX_OUTPUT:30000}
-  context-window-tokens: ${DLC_CONTEXT_WINDOW:131072}
+  # 模型上下文窗口（tokens）。应与实际模型规格一致，例如 agnes-3.0-flash 为 524288。
+  # 该值决定压缩触发点，配小了会导致长任务被频繁压缩。
+  context-window-tokens: ${DLC_CONTEXT_WINDOW:524288}
   context-compression-enabled: ${DLC_CONTEXT_COMPRESSION:true}
   vision-enabled: ${DLC_VISION:true}
-  max-completion-tokens: ${DLC_MAX_COMPLETION_TOKENS:8192}
+  # 单次 API 调用最大 completion tokens。agnes-3.0-flash 支持 65536，
+  # 8192 会在长任务规划阶段就被截断，故默认 32768（留出余量不顶满）。
+  max-completion-tokens: ${DLC_MAX_COMPLETION_TOKENS:32768}
+  # 单回合协作式停止上限。0 = 不限制（默认，保持原有行为）。
+  # 到达后于下一次迭代边界停止，不会打断正在执行的工具。
+  turn:
+    max-duration-seconds: ${DLC_TURN_MAX_DURATION:0}
+    max-tool-calls: ${DLC_TURN_MAX_TOOL_CALLS:0}
   subagent:
     enabled: ${DLC_SUBAGENT_ENABLED:true}
     max-depth: ${DLC_SUBAGENT_MAX_DEPTH:1}
