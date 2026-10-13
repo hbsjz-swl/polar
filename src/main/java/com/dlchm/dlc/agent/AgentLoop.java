@@ -18,6 +18,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -317,7 +318,7 @@ public final class AgentLoop {
                 if (blocked != null) {
                     result = blocked;
                 } else if (callback == null) {
-                    result = "Error: Unknown tool '" + name + "'";
+                    result = unknownTool(name, tools.keySet());
                 } else {
                     try {
                         result = callback.call(repairArguments(call.arguments()));
@@ -784,6 +785,34 @@ public final class AgentLoop {
         Platform platform = Platform.get();
         return "\n- Platform: " + platform.name() + "\n"
                 + platform.shellHints() + "\n";
+    }
+
+    /**
+     * Explains an unrecognised tool call by listing what is actually available.
+     *
+     * <p>A bare "Unknown tool 'x'" leaves the model with nothing to act on: it has
+     * to guess whether the name is misspelled, belongs to another product, or is a
+     * tool it was never offered. A real run produced
+     * {@code bash_execute\n<parameter=command} — a leaked XML parameter tag folded
+     * into the tool name by a streaming parser — and the model had no way to
+     * recognise that as a formatting slip rather than a missing capability.</p>
+     *
+     * <p>Listing the live names also keeps this honest as tools change: the set comes
+     * from the same map the dispatch uses, so a tool hidden from this turn (a
+     * subagent's denied prefix, a disabled delegate) is genuinely absent from the
+     * message rather than advertised and then refused.</p>
+     */
+    static String unknownTool(String requested, Collection<String> available) {
+        StringBuilder names = new StringBuilder();
+        for (String name : available.stream().sorted().toList()) {
+            if (!names.isEmpty()) names.append(", ");
+            names.append(name);
+        }
+        return "Error: Unknown tool '" + requested + "'."
+                + (available.isEmpty() ? " No tools are available in this turn."
+                : " Call one of these by its exact name: " + names + ".")
+                + " Do not invent tool names or include parameter tags in the name;"
+                + " put every argument inside the arguments object.";
     }
 
     private ToolCallback[] visibleTools(ToolCallback[] callbacks, int depth) {
