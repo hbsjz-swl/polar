@@ -28,16 +28,29 @@ public class SkillsTool {
 
     /**
      * pattern[0] = glob pattern relative to SKILL.md directory
-     * pattern[1] = relative path prefix for the key
+     * pattern[1] = containing directory for local skills; empty means the skill root
      */
     private static final String[][] COMPANION_PATTERNS = {
             {"*.md", ""},
             {"scripts/*.py", "scripts/"},
+            {"scripts/**/*.py", "scripts/"},
             {"scripts/*.sh", "scripts/"},
+            {"scripts/**/*.sh", "scripts/"},
             {"scripts/*.js", "scripts/"},
+            {"scripts/**/*.js", "scripts/"},
+            {"scripts/**/*.md", "scripts/"},
+            {"scripts/**/*.json", "scripts/"},
+            {"scripts/**/*.xml", "scripts/"},
+            {"scripts/**/*.xsd", "scripts/"},
+            {"scripts/**/*.txt", "scripts/"},
             {"examples/*.py", "examples/"},
+            {"examples/**/*.py", "examples/"},
             {"examples/*.sh", "examples/"},
+            {"examples/**/*.sh", "examples/"},
             {"examples/*.js", "examples/"},
+            {"examples/**/*.js", "examples/"},
+            {"examples/**/*.md", "examples/"},
+            {"references/**/*.md", "references/"},
     };
 
     private final Map<String, SkillEntry> skills = new LinkedHashMap<>();
@@ -134,19 +147,19 @@ public class SkillsTool {
         Map<String, String> companions = new LinkedHashMap<>();
         for (String[] pattern : COMPANION_PATTERNS) {
             String prefix = pattern[1];
-            Path searchDir = prefix.isEmpty() ? skillDir : skillDir.resolve(prefix.replace("/", ""));
+            Path searchDir = prefix.isEmpty() ? skillDir
+                    : skillDir.resolve(prefix.substring(0, prefix.length() - 1));
             if (!Files.isDirectory(searchDir)) continue;
 
-            try (var files = Files.list(searchDir)) {
+            try (var files = pattern[0].contains("**") ? Files.walk(searchDir) : Files.list(searchDir)) {
                 String ext = pattern[0].substring(pattern[0].lastIndexOf('.'));
                 files.filter(f -> Files.isRegularFile(f) && f.toString().endsWith(ext))
                         .filter(f -> !f.getFileName().toString().equalsIgnoreCase("SKILL.md"))
                         .filter(f -> !f.getFileName().toString().equalsIgnoreCase("LICENSE.txt"))
                         .forEach(f -> {
                             try {
-                                String key = prefix.isEmpty()
-                                        ? f.getFileName().toString()
-                                        : prefix + f.getFileName().toString();
+                                String key = skillDir.relativize(f).toString()
+                                        .replace(java.io.File.separatorChar, '/');
                                 companions.put(key, Files.readString(f, StandardCharsets.UTF_8));
                             } catch (IOException ignored) {}
                         });
@@ -186,7 +199,11 @@ public class SkillsTool {
                         String filename = sibling.getFilename();
                         if (filename != null && !filename.equalsIgnoreCase("SKILL.md")
                                 && !filename.equalsIgnoreCase("LICENSE.txt")) {
-                            String key = pattern[1].isEmpty() ? filename : pattern[1] + filename;
+                            String siblingUri = sibling.getURI().toString();
+                            String baseUri = dirUri.endsWith("/") ? dirUri : dirUri + "/";
+                            String key = siblingUri.startsWith(baseUri)
+                                    ? siblingUri.substring(baseUri.length())
+                                    : pattern[1] + filename;
                             try (InputStream in = sibling.getInputStream()) {
                                 companions.put(key, StreamUtils.copyToString(in, StandardCharsets.UTF_8));
                             }
@@ -206,13 +223,21 @@ public class SkillsTool {
         boolean extracted = false;
         for (Map.Entry<String, String> entry : companions.entrySet()) {
             String relPath = entry.getKey();
-            if (relPath.endsWith(".py") || relPath.endsWith(".sh") || relPath.endsWith(".js")) {
+            boolean executable = relPath.endsWith(".py") || relPath.endsWith(".sh")
+                    || relPath.endsWith(".js");
+            boolean scriptResource = relPath.startsWith("scripts/")
+                    && (relPath.endsWith(".md") || relPath.endsWith(".json")
+                    || relPath.endsWith(".xml") || relPath.endsWith(".xsd")
+                    || relPath.endsWith(".txt"));
+            if (executable || scriptResource) {
                 Path target = skillDir.resolve(relPath);
                 try {
                     Files.createDirectories(target.getParent());
                     Files.writeString(target, entry.getValue(), StandardCharsets.UTF_8);
-                    target.toFile().setExecutable(true);
-                    extracted = true;
+                    if (executable) {
+                        target.toFile().setExecutable(true);
+                        extracted = true;
+                    }
                 } catch (IOException e) {
                     log.warn("Failed to extract script {}: {}", relPath, e.getMessage());
                 }

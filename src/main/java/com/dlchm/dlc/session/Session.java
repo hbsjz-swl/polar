@@ -8,6 +8,12 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.messages.part.OpaquePayload;
+import org.springframework.ai.chat.messages.part.MessagePart;
+import org.springframework.ai.chat.messages.part.ReasoningPart;
+import org.springframework.ai.chat.messages.part.TextPart;
+import org.springframework.ai.chat.messages.part.ToolCallPart;
+import org.springframework.ai.chat.messages.part.UnknownPart;
 
 /**
  * In-memory working set for one conversation. The {@link MarkdownSessionStore}
@@ -80,13 +86,31 @@ public class Session {
         int n = message.getText() == null ? 0 : message.getText().length();
         if (message instanceof AssistantMessage assistant) {
             n += assistant.getToolCalls().stream().mapToInt(c -> c.arguments().length()).sum();
-            n += assistant.getReasoning().stream().mapToInt(r ->
-                    (r.summary() == null ? 0 : r.summary().length())
-                            + (r.payload() == null ? 0 : r.payload().toString().length())).sum();
+            n += assistant.getParts().stream().mapToInt(Session::partSize).sum();
         } else if (message instanceof ToolResponseMessage tools) {
             n += tools.getResponses().stream().mapToInt(r -> r.responseData().length()).sum();
         }
         return n + 32;
+    }
+
+    private static int partSize(MessagePart part) {
+        if (part instanceof ReasoningPart reasoning) {
+            return length(reasoning.text()) + length(reasoning.summary()) + payloadSize(reasoning.payload());
+        }
+        if (part instanceof TextPart text) return payloadSize(text.payload());
+        if (part instanceof ToolCallPart call) return payloadSize(call.payload());
+        if (part instanceof UnknownPart unknown) {
+            return length(unknown.rawJson()) + payloadSize(unknown.payload());
+        }
+        return 0;
+    }
+
+    private static int payloadSize(OpaquePayload payload) {
+        return payload == null ? 0 : length(payload.data());
+    }
+
+    private static int length(String value) {
+        return value == null ? 0 : value.length();
     }
 
     public synchronized void clearHistory() {

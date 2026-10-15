@@ -6,8 +6,8 @@ import com.dlchm.dlc.session.Session;
 import com.dlchm.dlc.session.MarkdownSessionStore;
 import com.dlchm.dlc.tools.MemoryTool;
 import java.time.Duration;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.responses.OpenAiResponsesChatModel;
+import org.springframework.ai.openai.responses.OpenAiResponsesChatOptions;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -21,7 +21,7 @@ public class CodingAgent {
     private final DlcProperties properties;
     private final AgnesRequestRateLimiter rateLimiter;
     private final ApprovalManager approvalManager;
-    private volatile OpenAiChatModel model;
+    private volatile OpenAiResponsesChatModel model;
     private volatile String baseUrl;
     private volatile String apiKey;
     private volatile String modelName;
@@ -29,9 +29,9 @@ public class CodingAgent {
     public CodingAgent(ToolCallbackProvider toolCallbacks, SandboxPathResolver pathResolver,
                        MemoryTool memoryTool, DlcProperties properties, String systemPromptTemplate,
                        ApprovalManager approvalManager, MarkdownSessionStore sessionStore,
-                       @Value("${spring.ai.openai.base-url}") String baseUrl,
+                       @Value("${spring.ai.openai.responses.base-url:${spring.ai.openai.base-url}}") String baseUrl,
                        @Value("${spring.ai.openai.api-key}") String apiKey,
-                       @Value("${spring.ai.openai.chat.options.model}") String modelName) {
+                       @Value("${spring.ai.openai.responses.model:${spring.ai.openai.chat.options.model}}") String modelName) {
         this.rateLimiter = new AgnesRequestRateLimiter();
         this.approvalManager = approvalManager;
         this.loop = new AgentLoop(toolCallbacks, pathResolver, memoryTool, properties,
@@ -45,9 +45,11 @@ public class CodingAgent {
 
     /** /config changes the model connection without restarting the channels. */
     public synchronized void reloadConfig() {
-        String url = System.getProperty("spring.ai.openai.base-url");
+        String url = System.getProperty("spring.ai.openai.responses.base-url");
+        if (url == null || url.isBlank()) url = System.getProperty("spring.ai.openai.base-url");
         String key = System.getProperty("spring.ai.openai.api-key");
-        String name = System.getProperty("spring.ai.openai.chat.options.model");
+        String name = System.getProperty("spring.ai.openai.responses.model");
+        if (name == null || name.isBlank()) name = System.getProperty("spring.ai.openai.chat.options.model");
         if (url != null && !url.isBlank()) baseUrl = url;
         if (key != null && !key.isBlank()) apiKey = key;
         if (name != null && !name.isBlank()) modelName = name;
@@ -71,8 +73,14 @@ public class CodingAgent {
      * yield 0 and silently disable the nesting guard.</p>
      */
     public Flux<StreamEvent> stream(Session session, String userMessage, int subagentDepth) {
+        return stream(session, userMessage, subagentDepth, null);
+    }
+
+    /** Runs a child turn with a role-specific system instruction. */
+    public Flux<StreamEvent> stream(Session session, String userMessage, int subagentDepth,
+                                    String roleInstruction) {
         return Flux.create(sink -> {
-            OpenAiChatModel current = model;
+            OpenAiResponsesChatModel current = model;
             if (!sink.isCancelled()) {
                 sink.next(new StreamEvent(StreamEvent.Type.TURN_STARTED,
                         "{\"sessionId\":\"" + escape(session.getId()) + "\"}"));
@@ -81,7 +89,7 @@ public class CodingAgent {
                 synchronized (session) {
                     try {
                         ExecutionContext.run(session, subagentDepth,
-                                () -> loop.run(session, userMessage, sink, current));
+                                () -> loop.run(session, userMessage, sink, current, roleInstruction));
                         if (!sink.isCancelled()) {
                             sink.next(new StreamEvent(StreamEvent.Type.TURN_COMPLETED, "{}"));
                         }
@@ -108,28 +116,34 @@ public class CodingAgent {
     }
 
     public String chat(Session session, String userMessage, int subagentDepth) {
+        return chat(session, userMessage, subagentDepth, null);
+    }
+
+    public String chat(Session session, String userMessage, int subagentDepth, String roleInstruction) {
         StringBuilder result = new StringBuilder();
-        stream(session, userMessage, subagentDepth)
+        stream(session, userMessage, subagentDepth, roleInstruction)
                 .doOnNext(event -> {
                     if (event.type() == StreamEvent.Type.TOKEN) result.append(event.data());
                 }).blockLast();
         return result.toString();
     }
 
-    private OpenAiChatModel buildModel() {
+    private OpenAiResponsesChatModel buildModel() {
         String url = baseUrl.strip().replaceAll("/+$", "");
         if (!url.endsWith("/v1")) url += "/v1";
-        var builder = OpenAiChatOptions.builder()
+        var builder = OpenAiResponsesChatOptions.builder()
                 .baseUrl(url)
                 .apiKey(apiKey)
                 .model(modelName)
                 .timeout(Duration.ofSeconds(180))
                 .maxRetries(0)
+                .reasoningEffort("low")
+                .parallelToolCalls(true)
                 .strict(false);
         if (properties.getMaxCompletionTokens() > 0) {
-            builder.maxCompletionTokens(properties.getMaxCompletionTokens());
+            builder.maxOutputTokens(properties.getMaxCompletionTokens());
         }
-        return OpenAiChatModel.builder().options(builder.build()).build();
+        return OpenAiResponsesChatModel.builder().options(builder.build()).build();
     }
 
     private static String escape(String value) {

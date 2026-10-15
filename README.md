@@ -18,7 +18,8 @@
 - 目标驱动循环：每轮重注入原始目标与成功判定契约，剩余预算实时可见
 - `polar exec --jsonl` 无交互执行模式
 - 有界的子 Agent 委派（独立会话、超时、取消）
-- 支持任意 OpenAI 兼容 API（通义千问、DeepSeek、GPT-4o、Ollama 等）
+- 使用 Spring AI 2.1.0-M1 的 OpenAI Responses API；服务端需要提供 `/v1/responses`
+- 支持 Responses API 工具调用、流式推理以及可复用的专家子 Agent
 - 首次启动交互式配置，无需手动编辑配置文件
 
 
@@ -107,14 +108,15 @@ polar
   ║        DLC - Initial Setup           ║
   ╚══════════════════════════════════════╝
 
-  API Base URL [https://dashscope.aliyuncs.com/compatible-mode]:
+  API Base URL [https://dashscope.aliyuncs.com/compatible-mode/v1]:
   API Key: ********
-  Model name [指令模型名称，例如 qwen3.5-plus-2026-02-15]:
+  Model name [例如 qwen3.8-27b]:
 
   Configuration saved!
 ```
 
-- 直接回车使用默认值（通义千问）
+- 直接回车使用默认值；千问工作空间可填写 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`
+- Base URL 是 `/v1` 前缀，DLC 会请求其下的 `/responses`
 - API Key 输入时不显示明文
 - 向导还会询问子 Agent 的开关与限值，每项都带中文说明
 - 配置保存在 `~/.dlc/config.properties`（每个参数旁都有中文注释），下次启动自动加载
@@ -122,12 +124,12 @@ polar
 
 ### 常用 API 配置
 
-| 平台 | Base URL | 模型示例 |
-|------|----------|---------|
-| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode` | `qwen3.5-plus-2026-02-15` |
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
-| OpenAI | `https://api.openai.com` | `gpt-4o` |
-| 本地 Ollama | `http://localhost:11434` | `qwen2.5-coder:7b` |
+| 平台 | Responses API Base URL | 模型示例 |
+|------|------------------------|---------|
+| 通义千问 | `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` | `qwen3.8-27b` |
+| OpenAI | `https://api.openai.com/v1` | 账户中可用的 Responses API 模型 |
+
+其他服务需要明确支持 OpenAI Responses API，只有 Chat Completions 接口的服务不能直接使用。
 
 ### 内置命令
 
@@ -269,11 +271,14 @@ cat task.txt | polar exec --jsonl
 
 #### 触发方式一：模型自动委派
 
-`delegate_task` 工具常驻工具集。任务能拆成 2 个以上互不依赖的块时，模型会自行委派，
-你不需要做任何事。也可以在提问时直接要求：
+`Task` 工具使用 `src/main/resources/agents/*.md` 中定义的专家角色（`explorer`、`code-reviewer`、
+`planner`）执行专门任务。通用的临时委派仍可使用 `delegate_task`；两者都受 DLC 子代理的会话、
+并发、超时和嵌套限制管理。`Task` 还支持后台执行，通过 `TaskOutput` 读取结果。
+
+也可以在提问时明确要求调用专家：
 
 ```
-请用 delegate_task 委派两个独立子任务，一个查 a.txt，一个查 b.txt，并行跑完后汇总。
+请用 Task 选择 explorer，读取 a.txt 并只报告文件中列出的服务名称。
 ```
 
 #### 触发方式二：用户手动派发（`/sub`）
@@ -304,7 +309,8 @@ you> /sub list
 `/agents` 是 `/sub list` 的别名，两者输出相同。
 
 > **注意**：`/sub` 是阻塞命令，**必须等它打印出结果才会回到 `you>` 提示符**，
-> 期间无法输入 `/sub cancel`。要取消一个正在跑的子代理，有两个办法：
+> 期间无法输入 `/sub cancel`。`Task` 同步调用也会等待子代理返回；后台任务可用 `TaskOutput` 取回结果。
+> 要取消一个正在跑的 `/sub` 子代理，有两个办法：
 > 用 `Ctrl+C` 中断当前命令，或改用 HTTP 接口从另一个终端取消
 > （`POST /api/agent/{taskId}/cancel`）。这一点与 `/sub` 的同步语义有关，
 > 不是缺陷——模型通过 `delegate_task` 委派时同样是阻塞等待的。
@@ -354,7 +360,7 @@ subagent-max-depth=2
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| `DLC_SUBAGENT_ENABLED` | `true` | 设为 `false` 则不向模型暴露 `delegate_task`，`/sub` 也会拒绝 |
+| `DLC_SUBAGENT_ENABLED` | `true` | 设为 `false` 则不向模型暴露 `Task`、`TaskOutput` 和 `delegate_task`，`/sub` 也会拒绝 |
 | `DLC_SUBAGENT_MAX_DEPTH` | `1` | 最大嵌套深度，1 表示子 Agent 不能继续派发 |
 | `DLC_SUBAGENT_MAX_CONCURRENT` | `4` | 同时运行的子 Agent 上限 |
 | `DLC_SUBAGENT_TIMEOUT` | `300` | 默认超时秒数 |
@@ -370,7 +376,7 @@ DLC_SUBAGENT_MAX_CONCURRENT=8 DLC_SUBAGENT_TIMEOUT=600 polar
 ```
 
 `enabled` 和 `max-concurrent` 都在**每次调用时**读取，所以 `/config` 里改完立刻影响下一次委派：
-关掉开关后模型再也看不到 `delegate_task`（不会去调一个必然失败的工具），调高并发后正在排队的
+关掉开关后模型再也看不到子代理工具（不会去调一个必然失败的工具），调高并发后正在排队的
 子 Agent 会被立即放行。`max-depth` 与两个超时同理。
 
 #### HTTP 接口

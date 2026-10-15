@@ -66,6 +66,11 @@ public class SubagentManager {
     }
 
     public String delegate(String prompt, Integer timeoutSeconds) {
+        return delegate(prompt, timeoutSeconds, null);
+    }
+
+    /** Runs a bounded child turn with an optional specialist system instruction. */
+    public String delegate(String prompt, Integer timeoutSeconds, String roleInstruction) {
         DlcProperties.SubagentConfig config = properties.getSubagent();
         if (!config.isEnabled()) {
             return "Error: subagent delegation is disabled (dlc.subagent.enabled=false). "
@@ -73,9 +78,11 @@ public class SubagentManager {
         }
         if (prompt == null || prompt.isBlank()) return "Error: subagent prompt is empty";
         int maxPrompt = Math.max(1, config.getMaxPromptChars());
-        if (prompt.length() > maxPrompt) {
+        int instructionLength = roleInstruction == null ? 0 : roleInstruction.length();
+        if ((long) prompt.length() + instructionLength > maxPrompt) {
             return "Error: subagent prompt is too long (" + prompt.length()
-                    + " chars, limit " + maxPrompt + "). Split the task or pass a shorter brief.";
+                    + " task chars plus " + instructionLength + " role chars, limit " + maxPrompt
+                    + "). Split the task or pass a shorter brief.";
         }
         int depth = ExecutionContext.subagentDepth();
         int maxDepth = Math.max(0, config.getMaxDepth());
@@ -111,7 +118,7 @@ public class SubagentManager {
             // The depth is passed explicitly: chat() hops to another thread, so
             // the thread-local would read 0 and the child's own children would
             // never be blocked.
-            return agentProvider.getObject().chat(child, prompt, childDepth);
+            return agentProvider.getObject().chat(child, prompt, childDepth, roleInstruction);
         }, executor);
         task.future = future;
         try {

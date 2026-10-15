@@ -61,14 +61,18 @@ public class DlcSetup {
      * 将配置设置为系统属性，供 Spring Boot 读取。
      */
     public static void ensureConfigured() {
-        String envUrl = System.getenv("SPRING_AI_OPENAI_BASE_URL");
+        String envUrl = System.getenv("SPRING_AI_OPENAI_RESPONSES_BASE_URL");
+        if (envUrl == null || envUrl.isBlank()) envUrl = System.getenv("SPRING_AI_OPENAI_BASE_URL");
         String envKey = System.getenv("SPRING_AI_OPENAI_API_KEY");
-        String envModel = System.getenv("SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL");
+        String envModel = System.getenv("SPRING_AI_OPENAI_RESPONSES_MODEL");
+        if (envModel == null || envModel.isBlank()) envModel = System.getenv("SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL");
         if (envUrl != null && !envUrl.isBlank() && envKey != null && !envKey.isBlank()
                 && envModel != null && !envModel.isBlank()) {
             System.setProperty("spring.ai.openai.base-url", envUrl);
+            System.setProperty("spring.ai.openai.responses.base-url", envUrl);
             System.setProperty("spring.ai.openai.api-key", envKey);
             System.setProperty("spring.ai.openai.chat.options.model", envModel);
+            System.setProperty("spring.ai.openai.responses.model", envModel);
             return;
         }
         Properties config = loadConfig();
@@ -142,7 +146,7 @@ public class DlcSetup {
         writer.write("# Polar 配置\n");
         writer.write("# 由 /config 命令生成，可直接编辑后重启生效。\n");
         writer.write("#\n");
-        writeField(writer, config, KEY_BASE_URL, "模型服务地址，OpenAI 兼容接口");
+        writeField(writer, config, KEY_BASE_URL, "Responses API 服务地址前缀，代码会在末尾请求 /responses");
         writeField(writer, config, KEY_API_KEY, "API 密钥，保存后本文件权限收紧为仅当前用户可读写");
         writeField(writer, config, KEY_MODEL, "使用的模型名称");
         writer.write("\n# ── 子 Agent（Sub Agent）──\n");
@@ -174,8 +178,8 @@ public class DlcSetup {
             if (field.key().equals(key)) return field.def();
         }
         return switch (key) {
-            case KEY_BASE_URL -> "https://dashscope.aliyuncs.com/compatible-mode";
-            case KEY_MODEL -> "qwen3.5-plus-2026-02-15";
+            case KEY_BASE_URL -> "https://dashscope.aliyuncs.com/compatible-mode/v1";
+            case KEY_MODEL -> "qwen3.8-27b";
             default -> "（无）";
         };
     }
@@ -199,7 +203,7 @@ public class DlcSetup {
         String baseUrl = promptRequired(console, reader,
                 "API Base URL",
                 currentUrl,
-                "e.g., https://dashscope.aliyuncs.com/compatible-mode, https://api.deepseek.com, https://api.openai.com");
+                "Responses API base URL, e.g. https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
 
         // API Key (required)
         String currentKey = existing.getProperty(KEY_API_KEY, "");
@@ -215,7 +219,7 @@ public class DlcSetup {
         String model = promptRequired(console, reader,
                 "Model name",
                 currentModel,
-                "e.g., qwen3.5-plus-2026-02-15, deepseek-chat, gpt-4o");
+                "e.g., qwen3.8-27b");
 
         System.out.println();
         System.out.println(ANSI_CYAN + "  ── 子 Agent（Sub Agent）──" + ANSI_RESET);
@@ -323,12 +327,14 @@ public class DlcSetup {
 
         if (baseUrl != null && !baseUrl.isBlank()) {
             System.setProperty("spring.ai.openai.base-url", baseUrl);
+            System.setProperty("spring.ai.openai.responses.base-url", baseUrl);
         }
         if (apiKey != null && !apiKey.isBlank()) {
             System.setProperty("spring.ai.openai.api-key", apiKey);
         }
         if (model != null && !model.isBlank()) {
             System.setProperty("spring.ai.openai.chat.options.model", model);
+            System.setProperty("spring.ai.openai.responses.model", model);
         }
         applySubagentToSystemProperties(config);
     }

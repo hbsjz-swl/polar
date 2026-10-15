@@ -4,11 +4,16 @@ spring:
     banner-mode: off
   ai:
     openai:
-      base-url: ${spring.ai.openai.base-url:https://dashscope.aliyuncs.com/compatible-mode}
+      base-url: ${spring.ai.openai.base-url:https://dashscope.aliyuncs.com/compatible-mode/v1}
       api-key: ${spring.ai.openai.api-key:placeholder}
+      # DLC uses Spring AI's stateless Responses API model; its endpoint is base-url + /responses.
+      # Both properties fall back to the existing setup-wizard keys for compatibility.
+      responses:
+        base-url: ${SPRING_AI_OPENAI_RESPONSES_BASE_URL:${spring.ai.openai.base-url}}
+        model: ${SPRING_AI_OPENAI_RESPONSES_MODEL:${spring.ai.openai.chat.options.model}}
       chat:
         options:
-          model: ${spring.ai.openai.chat.options.model:qwen3.5-plus-2026-02-15}
+          model: ${spring.ai.openai.chat.options.model:qwen3.8-27b}
 
 server:
   port: ${SERVER_PORT:19869}

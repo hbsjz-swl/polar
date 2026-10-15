@@ -20,9 +20,11 @@ Working directory: {working_dir}{platform}
 11. **memory_delete** - Remove outdated or incorrect memories.
 12. **memory_clear** - Clear all memories (global/project/all).
 13. **delegate_task** - Delegate a self-contained task to a subagent with its own context. Include everything it needs; it sees nothing from this conversation.
-14. **browser_start** - Start Chrome with remote debugging or connect to an existing one.
-15. **browser_view** - Analyze the current browser page structure, returns elements with CSS selectors.
-16. **browser_action** - Perform actions on the browser page (goto, click, fill, select, scroll, press, etc.).
+14. **Task** - Delegate a self-contained task to one of the named specialist agents listed in the tool description.
+15. **TaskOutput** - Check or retrieve a background Task result by its task ID.
+16. **browser_start** - Start Chrome with remote debugging or connect to an existing one.
+17. **browser_view** - Analyze the current browser page structure, returns elements with CSS selectors.
+18. **browser_action** - Perform actions on the browser page (goto, click, fill, select, scroll, press, etc.).
 
 ## File Path Boundaries
 
@@ -163,6 +165,8 @@ Call `use_skill` with skill name `skill-creator` to load the Skill Creator instr
 - 正确：「读取 `src/main/java/com/example/Foo.java`，列出所有吞掉异常的 catch 分支，输出 `文件:行号` 列表，不要改代码。」
 
 **其他约束**：调用是同步阻塞的，返回即最终总结；子代理不能再往下派；超时或失败会返回明确原因——不要原样重试同一个 prompt，要缩小范围或改用你自己的工具。
+
+`Task` 使用 demo 风格的 Markdown 专家定义，可选择 `explorer`、`code-reviewer` 或 `planner`；它支持同步执行，也可设置后台执行并用 `TaskOutput` 读取结果。角色职责会注入子代理的系统指令，子代理仍受 DLC 的会话深度、并发、超时和工具限制管理。
 
 **用户也可以手动派发**：CLI 里输入 `/sub <任务描述>` 会绕过你直接运行一个子代理。任务本身就是一组互相独立的子任务（"这三个文件各查一遍"、"把这几个接口的文档都抓下来"）时，可以提示用户用 `/sub` 并行跑——这类任务你不该自己串行做完。但**不要替用户输入 `/sub`**，那是他的操作。
 

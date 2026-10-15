@@ -36,7 +36,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.MessageAggregator;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.content.Media;
-import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.responses.OpenAiResponsesChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.core.io.ByteArrayResource;
@@ -44,9 +44,8 @@ import org.springframework.util.MimeTypeUtils;
 import reactor.core.publisher.FluxSink;
 
 /**
- * A bounded Chat Completions model/tool loop. The live transcript retains
- * assistant tool calls and tool results so they can be replayed in the next
- * request using the standard role=assistant/role=tool protocol.
+ * A bounded Responses API model/tool loop. The live transcript retains ordered
+ * assistant parts, tool calls and tool results for stateless replay.
  */
 public final class AgentLoop {
     private static final Logger log = LoggerFactory.getLogger(AgentLoop.class);
@@ -141,9 +140,10 @@ public final class AgentLoop {
         agentMd = "";
     }
 
-    public void run(Session session, String input, FluxSink<StreamEvent> sink, OpenAiChatModel model) {
+    public void run(Session session, String input, FluxSink<StreamEvent> sink,
+                    OpenAiResponsesChatModel model, String roleInstruction) {
         try {
-            runInternal(session, input, sink, model);
+            runInternal(session, input, sink, model, roleInstruction);
         } finally {
             // The in-memory history is the last consistent checkpoint even if
             // the caller cancels while a model/tool request is in flight.
@@ -151,7 +151,8 @@ public final class AgentLoop {
         }
     }
 
-    private void runInternal(Session session, String input, FluxSink<StreamEvent> sink, OpenAiChatModel model) {
+    private void runInternal(Session session, String input, FluxSink<StreamEvent> sink,
+                             OpenAiResponsesChatModel model, String roleInstruction) {
         int depth = ExecutionContext.subagentDepth();
         ToolCallback[] callbacks = visibleTools(toolProvider.getToolCallbacks(), depth);
         Map<String, ToolCallback> tools = new HashMap<>();
@@ -170,6 +171,8 @@ public final class AgentLoop {
                 // the host, so it has to be told which conventions apply or it
                 // writes `rm -rf` on Windows and retries variations when it fails.
                 .replace("{platform}", platformBrief())
+                + (roleInstruction == null || roleInstruction.isBlank() ? ""
+                        : "\n\n## 当前子 Agent 的专属职责\n" + roleInstruction)
                 // How to declare the goal finished or blocked. Part of the base
                 // template rather than the per-round contract, because it is an output
                 // rule that holds for every turn, not a restatement of this goal.
@@ -264,7 +267,7 @@ public final class AgentLoop {
                 // how the loop reads the verdict, not part of the answer the user reads.
                 String visible = GoalCompletion.strip(text);
                 if (!visible.equals(text)) {
-                    answer = new AssistantMessage(visible);
+                    answer = visibleAssistantMessage(answer, visible);
                 }
                 messages.add(answer);
                 persist(session, messages);
@@ -280,8 +283,8 @@ public final class AgentLoop {
                 continue;
             }
 
-            // Keep the exact assistant message so Spring AI can serialize its
-            // assistant tool_calls for the next Chat Completions request.
+            // Keep the exact assistant message so Responses API item IDs and
+            // encrypted reasoning payloads survive the next stateless request.
             messages.add(answer);
             String narrated = AnswerGate.violation(taskState, text);
             if (narrated != null) {
@@ -418,7 +421,7 @@ public final class AgentLoop {
         throw new IllegalStateException("Maximum tool iterations (" + MAX_ITERATIONS + ") reached");
     }
 
-    private ChatResponse streamResponse(OpenAiChatModel model, Prompt prompt, FluxSink<StreamEvent> sink) {
+    private ChatResponse streamResponse(OpenAiResponsesChatModel model, Prompt prompt, FluxSink<StreamEvent> sink) {
         for (int attempt = 0; ; attempt++) {
             java.util.concurrent.atomic.AtomicBoolean emitted = new java.util.concurrent.atomic.AtomicBoolean();
             try {
@@ -439,7 +442,7 @@ public final class AgentLoop {
         }
     }
 
-    private ChatResponse streamResponseOnce(OpenAiChatModel model, Prompt prompt, FluxSink<StreamEvent> sink,
+    private ChatResponse streamResponseOnce(OpenAiResponsesChatModel model, Prompt prompt, FluxSink<StreamEvent> sink,
                                            java.util.concurrent.atomic.AtomicBoolean outputEmitted) {
         rateLimiter.acquire();
         AtomicReference<ChatResponse> full = new AtomicReference<>();
@@ -490,6 +493,27 @@ public final class AgentLoop {
             log.warn("Screenshot unavailable: {}", e.getClass().getSimpleName());
             return null;
         }
+    }
+
+    /** Remove internal completion markers while retaining Responses API reasoning parts. */
+    private static AssistantMessage visibleAssistantMessage(AssistantMessage source, String visibleText) {
+        List<org.springframework.ai.chat.messages.part.MessagePart> parts = new ArrayList<>();
+        boolean textAdded = false;
+        for (var part : source.getParts()) {
+            if (part instanceof org.springframework.ai.chat.messages.part.TextPart) {
+                if (!textAdded && !visibleText.isEmpty()) {
+                    // The text changed, so drop the provider item id and replay it as a normal message.
+                    parts.add(org.springframework.ai.chat.messages.part.TextPart.of(visibleText));
+                    textAdded = true;
+                }
+            } else {
+                parts.add(part);
+            }
+        }
+        if (!textAdded && !visibleText.isEmpty()) {
+            parts.add(org.springframework.ai.chat.messages.part.TextPart.of(visibleText));
+        }
+        return AssistantMessage.builder().parts(parts).build();
     }
 
     private boolean isBadRequest(Throwable error) {
@@ -827,12 +851,17 @@ public final class AgentLoop {
         List<ToolCallback> allowed = new ArrayList<>();
         for (ToolCallback callback : callbacks) {
             String name = callback.getToolDefinition().name();
-            if (!delegateVisible && "delegate_task".equals(name)) continue;
+            if (!delegateVisible && isSubagentTool(name)) continue;
+            if (depth > 0 && isSubagentTool(name)) continue;
             boolean blocked = depth > 0 && denied != null && denied.stream().anyMatch(prefix ->
                     prefix != null && !prefix.isBlank() && name.startsWith(prefix));
             if (!blocked) allowed.add(callback);
         }
         return allowed.toArray(ToolCallback[]::new);
+    }
+
+    private static boolean isSubagentTool(String name) {
+        return "delegate_task".equals(name) || "Task".equals(name) || "TaskOutput".equals(name);
     }
 
     private static ToolCallback[] readOnlySubset(ToolCallback[] callbacks, ToolFailureGuard guard) {

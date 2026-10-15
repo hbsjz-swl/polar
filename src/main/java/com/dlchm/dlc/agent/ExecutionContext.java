@@ -19,6 +19,25 @@ public final class ExecutionContext {
     public static <T> T call(Session session, int subagentDepth, Callable<T> action) {
         State previous = CURRENT.get();
         CURRENT.set(new State(session == null ? null : session.getId(), subagentDepth, false));
+        return callWithPrevious(previous, action);
+    }
+
+    /** Capture request identity before handing a task to an asynchronous executor. */
+    public static Snapshot capture() {
+        State state = CURRENT.get();
+        return state == null ? new Snapshot(null, 0, false)
+                : new Snapshot(state.sessionId(), state.subagentDepth(), state.approvalBypass());
+    }
+
+    /** Run work with a previously captured request identity on another thread. */
+    public static <T> T call(Snapshot snapshot, Callable<T> action) {
+        State previous = CURRENT.get();
+        Snapshot context = snapshot == null ? new Snapshot(null, 0, false) : snapshot;
+        CURRENT.set(new State(context.sessionId(), context.subagentDepth(), context.approvalBypass()));
+        return callWithPrevious(previous, action);
+    }
+
+    private static <T> T callWithPrevious(State previous, Callable<T> action) {
         try {
             return action.call();
         } catch (RuntimeException | Error e) {
@@ -64,4 +83,6 @@ public final class ExecutionContext {
     }
 
     private record State(String sessionId, int subagentDepth, boolean approvalBypass) {}
+
+    public record Snapshot(String sessionId, int subagentDepth, boolean approvalBypass) {}
 }

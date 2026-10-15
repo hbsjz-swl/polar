@@ -19,7 +19,7 @@
 
     <properties>
         <java.version>17</java.version>
-        <spring-ai.version>2.1.0-SNAPSHOT</spring-ai.version>
+        <spring-ai.version>2.1.0-M1</spring-ai.version>
         <tamboui.version>0.2.0-SNAPSHOT</tamboui.version>
     </properties>
 
@@ -69,7 +69,7 @@
         <dependency>
             <groupId>org.springaicommunity</groupId>
             <artifactId>spring-ai-agent-utils</artifactId>
-            <version>0.14.0-SNAPSHOT</version>
+            <version>0.13.0</version>
         </dependency>
 
         <!-- TamboUI: Terminal UI -->
@@ -215,6 +215,13 @@
             <version>2026_02_25-3d59511</version>
         </dependency>
 
+        <!-- Tools: Browser interaction -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>browser-use__browser-use__browser-use</artifactId>
+            <version>2026_02_23-1d154e1</version>
+        </dependency>
+
         <!-- Tools: Skill Creator -->
         <dependency>
             <groupId>com.skillsjars</groupId>
@@ -229,10 +236,25 @@
             <version>2026_03_06-b0cbd3d</version>
         </dependency>
 
-        <!-- Tools: PDF Processing -->
+        <!-- Tools: Document Processing -->
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__docx</artifactId>
+            <version>2026_02_25-3d59511</version>
+        </dependency>
         <dependency>
             <groupId>com.skillsjars</groupId>
             <artifactId>anthropics__skills__pdf</artifactId>
+            <version>2026_02_25-3d59511</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__pptx</artifactId>
+            <version>2026_02_25-3d59511</version>
+        </dependency>
+        <dependency>
+            <groupId>com.skillsjars</groupId>
+            <artifactId>anthropics__skills__xlsx</artifactId>
             <version>2026_02_25-3d59511</version>
         </dependency>
 

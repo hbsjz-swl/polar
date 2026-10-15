@@ -21,6 +21,12 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.messages.part.MessagePart;
+import org.springframework.ai.chat.messages.part.OpaquePayload;
+import org.springframework.ai.chat.messages.part.ReasoningPart;
+import org.springframework.ai.chat.messages.part.TextPart;
+import org.springframework.ai.chat.messages.part.ToolCallPart;
+import org.springframework.ai.chat.messages.part.UnknownPart;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -205,7 +211,11 @@ public class MarkdownSessionStore {
         if (message instanceof AssistantMessage assistant) {
             List<PersistedToolCall> calls = assistant.getToolCalls().stream()
                     .map(c -> new PersistedToolCall(c.id(), c.type(), c.name(), redact(c.arguments()))).toList();
-            return new PersistedMessage("assistant", redact(assistant.getText()), calls, List.of());
+            List<PersistedAssistantPart> parts = assistant.getParts().stream()
+                    .map(this::toAssistantPart)
+                    .filter(Objects::nonNull)
+                    .toList();
+            return new PersistedMessage("assistant", redact(assistant.getText()), calls, List.of(), parts);
         }
         if (message instanceof ToolResponseMessage tools) {
             List<PersistedToolResponse> responses = tools.getResponses().stream()
@@ -220,13 +230,18 @@ public class MarkdownSessionStore {
         return switch (record.role().toLowerCase(Locale.ROOT)) {
             case "user" -> new UserMessage(record.text() == null ? "" : record.text());
             case "assistant" -> {
+                if (record.assistantParts() != null && !record.assistantParts().isEmpty()) {
+                    List<MessagePart> parts = record.assistantParts().stream()
+                            .map(this::restoreAssistantPart)
+                            .filter(Objects::nonNull)
+                            .toList();
+                    yield AssistantMessage.builder().parts(parts).build();
+                }
                 List<AssistantMessage.ToolCall> calls = (record.toolCalls() == null ? List.<PersistedToolCall>of()
                         : record.toolCalls()).stream()
                         .map(c -> new AssistantMessage.ToolCall(c.id(), c.type(), c.name(), c.arguments())).toList();
-                yield AssistantMessage.builder()
-                        .content(record.text() == null ? "" : record.text())
-                        .toolCalls(calls)
-                        .build();
+                yield AssistantMessage.builder().content(record.text() == null ? "" : record.text())
+                        .toolCalls(calls).build();
             }
             case "tool" -> {
                 List<ToolResponseMessage.ToolResponse> responses = (record.toolResponses() == null
@@ -242,6 +257,66 @@ public class MarkdownSessionStore {
         return value == null ? "" : value.replace('\n', ' ').replace('\r', ' ');
     }
 
+    private PersistedAssistantPart toAssistantPart(MessagePart part) {
+        if (part instanceof TextPart text) {
+            return new PersistedAssistantPart("text", redact(text.text()), null,
+                    payloadProvider(text.payload()), payloadKind(text.payload()), payloadData(text.payload()),
+                    text.attributes(), null, null);
+        }
+        if (part instanceof ReasoningPart reasoning) {
+            return new PersistedAssistantPart("reasoning", redact(reasoning.text()), redact(reasoning.summary()),
+                    payloadProvider(reasoning.payload()), payloadKind(reasoning.payload()), payloadData(reasoning.payload()),
+                    reasoning.attributes(), null, null);
+        }
+        if (part instanceof ToolCallPart toolCall) {
+            AssistantMessage.ToolCall call = toolCall.toolCall();
+            return new PersistedAssistantPart("tool_call", null, null,
+                    payloadProvider(toolCall.payload()), payloadKind(toolCall.payload()), payloadData(toolCall.payload()),
+                    toolCall.attributes(), null,
+                    new PersistedToolCall(call.id(), call.type(), call.name(), redact(call.arguments())));
+        }
+        if (part instanceof UnknownPart unknown) {
+            return new PersistedAssistantPart("unknown", null, null,
+                    payloadProvider(unknown.payload()), payloadKind(unknown.payload()), payloadData(unknown.payload()),
+                    unknown.attributes(), redact(unknown.rawJson()), null);
+        }
+        // Generated media is not part of the current DLC tool protocol. It was not
+        // persisted by the older store either, so retain the established behavior.
+        return null;
+    }
+
+    private MessagePart restoreAssistantPart(PersistedAssistantPart part) {
+        if (part == null || part.type() == null) return null;
+        OpaquePayload payload = part.payloadData() == null ? null
+                : new OpaquePayload(part.payloadProvider(), part.payloadKind(), part.payloadData());
+        var attributes = part.attributes() == null ? java.util.Map.<String, String>of() : part.attributes();
+        return switch (part.type()) {
+            case "text" -> new TextPart(part.text(), payload, attributes);
+            case "reasoning" -> new ReasoningPart(part.text(), part.summary(), payload, attributes);
+            case "tool_call" -> {
+                PersistedToolCall call = part.toolCall();
+                if (call == null) yield null;
+                yield new ToolCallPart(new AssistantMessage.ToolCall(call.id(), call.type(), call.name(),
+                        call.arguments()), payload, attributes);
+            }
+            case "unknown" -> new UnknownPart(part.payloadProvider(), part.payloadKind(), part.rawJson(), payload,
+                    attributes);
+            default -> null;
+        };
+    }
+
+    private static String payloadProvider(OpaquePayload payload) {
+        return payload == null ? null : payload.provider();
+    }
+
+    private static String payloadKind(OpaquePayload payload) {
+        return payload == null ? null : payload.kind();
+    }
+
+    private static String payloadData(OpaquePayload payload) {
+        return payload == null ? null : payload.data();
+    }
+
     private String redact(String value) {
         if (value == null) return "";
         return value
@@ -253,7 +328,17 @@ public class MarkdownSessionStore {
 
     public record SessionFile(String id, String updatedAt, Path path) {}
     public record PersistedMessage(String role, String text, List<PersistedToolCall> toolCalls,
-                                   List<PersistedToolResponse> toolResponses) {}
+                                   List<PersistedToolResponse> toolResponses,
+                                   List<PersistedAssistantPart> assistantParts) {
+        public PersistedMessage(String role, String text, List<PersistedToolCall> toolCalls,
+                                List<PersistedToolResponse> toolResponses) {
+            this(role, text, toolCalls, toolResponses, List.of());
+        }
+    }
     public record PersistedToolCall(String id, String type, String name, String arguments) {}
     public record PersistedToolResponse(String id, String name, String responseData) {}
+    public record PersistedAssistantPart(String type, String text, String summary, String payloadProvider,
+                                         String payloadKind, String payloadData,
+                                         java.util.Map<String, String> attributes, String rawJson,
+                                         PersistedToolCall toolCall) {}
 }

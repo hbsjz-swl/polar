@@ -10,11 +10,11 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.responses.OpenAiResponsesChatModel;
 import org.springframework.ai.tool.ToolCallback;
 
 /**
- * Compresses history before each Chat Completions request. Recent Message
+ * Compresses history before each Responses API request. Recent Message
  * objects remain intact so assistant tool calls and tool results can be replayed.
  */
 public final class ContextCompressor {
@@ -56,7 +56,7 @@ public final class ContextCompressor {
     }
 
     public boolean compressIfNeeded(List<Message> messages, ToolCallback[] tools, int configuredWindow,
-                                    OpenAiChatModel model) {
+                                    OpenAiResponsesChatModel model) {
         int threshold = compactionThreshold(configuredWindow);
         if (estimate(messages, tools) <= threshold) return false;
         boolean changed = false;
@@ -148,9 +148,9 @@ public final class ContextCompressor {
         return String.join("\n", lines);
     }
 
-    private String generateSummary(String input, OpenAiChatModel model) {
+    private String generateSummary(String input, OpenAiResponsesChatModel model) {
         try {
-            var options = model.getOptions().mutate().toolCallbacks(List.of()).maxCompletionTokens(800).build();
+            var options = model.getOptions().mutate().toolCallbacks(List.of()).maxOutputTokens(800).build();
             rateLimiter.acquire();
             var response = model.call(new Prompt(List.of(
                     new SystemMessage("压缩对话。保留用户目标、已完成操作、重要路径、待办和失败原因。纯文本，不超过500字。"),

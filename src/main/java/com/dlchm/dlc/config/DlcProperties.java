@@ -59,7 +59,7 @@ public class DlcProperties {
      * 因为它是把「大任务拆成互不依赖的并行块」的唯一手段。</p>
      */
     public static class SubagentConfig {
-        /** 是否启用 delegate_task 工具 */
+        /** 是否启用模型子代理工具 */
         private boolean enabled = true;
         /** 最大嵌套深度：1 = 只允许父代理派子代理，子代理不能再派 */
         private int maxDepth = 1;
@@ -73,10 +73,10 @@ public class DlcProperties {
         private int maxPromptChars = 32000;
         /**
          * 子代理可用的工具名前缀黑名单。
-         * browser_* 会与父代理争抢同一个 CDP 标签页，delegate_task 会让嵌套深度失控。
+         * browser_* 会与父代理争抢同一个 CDP 标签页；子代理工具会让嵌套深度失控。
          */
         private List<String> deniedToolPrefixes = new ArrayList<>(
-                List.of("browser_", "delegate_task"));
+                List.of("browser_", "delegate_task", "Task"));
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }

@@ -15,7 +15,10 @@ import com.dlchm.dlc.tools.ToolOutputTruncator;
 import com.dlchm.dlc.tools.BrowserTool;
 import com.dlchm.dlc.tools.WriteFileTool;
 import com.dlchm.dlc.tools.SubagentTool;
+import com.dlchm.dlc.tools.DlcSubagentDefinition;
+import com.dlchm.dlc.tools.DlcSubagentResolver;
 import com.dlchm.dlc.agent.SubagentManager;
+import com.dlchm.dlc.agent.ContextPropagatingTaskRepository;
 import com.dlchm.dlc.session.MarkdownSessionStore;
 import com.dlchm.dlc.agent.ApprovalManager;
 import java.io.IOException;
@@ -26,12 +29,23 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import org.springaicommunity.agent.common.task.subagent.SubagentExecutor;
+import org.springaicommunity.agent.common.task.subagent.SubagentReference;
+import org.springaicommunity.agent.common.task.subagent.SubagentType;
+import org.springaicommunity.agent.common.task.subagent.TaskCall;
+import org.springaicommunity.agent.tools.task.TaskOutputTool;
+import org.springaicommunity.agent.tools.task.TaskTool;
+import org.springaicommunity.agent.tools.task.repository.TaskRepository;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.util.StreamUtils;
 
 /**
@@ -61,6 +75,55 @@ public class AgentConfiguration {
         return new ToolOutputTruncator(props.getMaxToolOutputChars());
     }
 
+    @Bean(destroyMethod = "shutdown")
+    public ContextPropagatingTaskRepository dlcTaskRepository() {
+        return new ContextPropagatingTaskRepository();
+    }
+
+    @Bean("dlcTaskTool")
+    public ToolCallback dlcTaskTool(SubagentManager subagentManager, TaskRepository taskRepository) {
+        DlcSubagentResolver resolver = new DlcSubagentResolver();
+        List<SubagentReference> references = specialistReferences();
+        SubagentExecutor executor = new SubagentExecutor() {
+            @Override
+            public String getKind() {
+                return DlcSubagentResolver.KIND;
+            }
+
+            @Override
+            public String execute(TaskCall call,
+                                  org.springaicommunity.agent.common.task.subagent.SubagentDefinition definition) {
+                if (call.model() != null && !call.model().isBlank()) {
+                    return "Error: this DLC instance uses one configured model; omit the optional model override.";
+                }
+                if (call.resume() != null && !call.resume().isBlank()) {
+                    return "Error: resuming a prior Task ID is not supported; provide a self-contained new task.";
+                }
+                DlcSubagentDefinition specialist = (DlcSubagentDefinition) definition;
+                String prompt = "任务描述：" + call.description() + "\n\n任务要求：\n" + call.prompt();
+                return subagentManager.delegate(prompt, null, specialist.instructions());
+            }
+        };
+        String description = """
+                Delegate one self-contained task to a named specialist.
+                Available specialists:\n%s
+                The child runs in an isolated DLC session and does not see the parent conversation. Include all facts, paths, constraints, and expected output in the task. A child cannot delegate further. Background execution is available through TaskOutput. The configured DLC model is used for every child.
+                """;
+        return TaskTool.builder()
+                .subagentTypes(new SubagentType(resolver, executor))
+                .subagentReferences(references)
+                .taskRepository(taskRepository)
+                .taskDescriptionTemplate(description)
+                .build();
+    }
+
+    @Bean("dlcTaskOutputTool")
+    public ToolCallback dlcTaskOutputTool(TaskRepository taskRepository) {
+        return TaskOutputTool.builder()
+                .taskRepository(taskRepository)
+                .build();
+    }
+
     @Bean
     public SkillsTool skillsTool() {
         return new SkillsTool();
@@ -87,7 +150,9 @@ public class AgentConfiguration {
             MemoryTool memoryTool,
             BrowserTool browserTool,
             ApprovalManager approvalManager,
-            SubagentManager subagentManager) {
+            SubagentManager subagentManager,
+            @Qualifier("dlcTaskTool") ToolCallback taskTool,
+            @Qualifier("dlcTaskOutputTool") ToolCallback taskOutputTool) {
         List<Object> tools = new ArrayList<>();
         tools.add(new ReadFileTool(pathResolver, truncator));
         tools.add(new WriteFileTool(pathResolver, props));
@@ -111,7 +176,32 @@ public class AgentConfiguration {
         ToolCallbackProvider provider = MethodToolCallbackProvider.builder()
                 .toolObjects(tools.toArray())
                 .build();
-        return new ObservingToolCallbackProvider(provider, new ToolCallTimingListener());
+        List<ToolCallback> callbacks = new ArrayList<>(List.of(provider.getToolCallbacks()));
+        callbacks.add(taskTool);
+        callbacks.add(taskOutputTool);
+        ToolCallbackProvider combined = () -> callbacks.toArray(ToolCallback[]::new);
+        return new ObservingToolCallbackProvider(combined, new ToolCallTimingListener());
+    }
+
+    private List<SubagentReference> specialistReferences() {
+        try {
+            Resource[] resources = new PathMatchingResourcePatternResolver()
+                    .getResources("classpath*:agents/*.md");
+            List<SubagentReference> references = new ArrayList<>();
+            for (Resource resource : resources) {
+                String filename = resource.getFilename();
+                if (filename != null && filename.endsWith(".md")) {
+                    references.add(new SubagentReference("classpath:/agents/" + filename,
+                            DlcSubagentResolver.KIND));
+                }
+            }
+            if (references.isEmpty()) {
+                throw new IllegalStateException("No DLC specialist definitions found under classpath:agents/");
+            }
+            return references;
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot enumerate DLC specialist definitions", e);
+        }
     }
 
     /**
