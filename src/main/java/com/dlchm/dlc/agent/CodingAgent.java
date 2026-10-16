@@ -29,9 +29,9 @@ public class CodingAgent {
     public CodingAgent(ToolCallbackProvider toolCallbacks, SandboxPathResolver pathResolver,
                        MemoryTool memoryTool, DlcProperties properties, String systemPromptTemplate,
                        ApprovalManager approvalManager, MarkdownSessionStore sessionStore,
-                       @Value("${spring.ai.openai.responses.base-url:${spring.ai.openai.base-url}}") String baseUrl,
+                       @Value("${spring.ai.openai.responses.base-url}") String baseUrl,
                        @Value("${spring.ai.openai.api-key}") String apiKey,
-                       @Value("${spring.ai.openai.responses.model:${spring.ai.openai.chat.options.model}}") String modelName) {
+                       @Value("${spring.ai.openai.responses.model}") String modelName) {
         this.rateLimiter = new AgnesRequestRateLimiter();
         this.approvalManager = approvalManager;
         this.loop = new AgentLoop(toolCallbacks, pathResolver, memoryTool, properties,
@@ -46,10 +46,8 @@ public class CodingAgent {
     /** /config changes the model connection without restarting the channels. */
     public synchronized void reloadConfig() {
         String url = System.getProperty("spring.ai.openai.responses.base-url");
-        if (url == null || url.isBlank()) url = System.getProperty("spring.ai.openai.base-url");
         String key = System.getProperty("spring.ai.openai.api-key");
         String name = System.getProperty("spring.ai.openai.responses.model");
-        if (name == null || name.isBlank()) name = System.getProperty("spring.ai.openai.chat.options.model");
         if (url != null && !url.isBlank()) baseUrl = url;
         if (key != null && !key.isBlank()) apiKey = key;
         if (name != null && !name.isBlank()) modelName = name;

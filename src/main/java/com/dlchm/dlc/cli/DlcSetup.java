@@ -62,16 +62,12 @@ public class DlcSetup {
      */
     public static void ensureConfigured() {
         String envUrl = System.getenv("SPRING_AI_OPENAI_RESPONSES_BASE_URL");
-        if (envUrl == null || envUrl.isBlank()) envUrl = System.getenv("SPRING_AI_OPENAI_BASE_URL");
         String envKey = System.getenv("SPRING_AI_OPENAI_API_KEY");
         String envModel = System.getenv("SPRING_AI_OPENAI_RESPONSES_MODEL");
-        if (envModel == null || envModel.isBlank()) envModel = System.getenv("SPRING_AI_OPENAI_CHAT_OPTIONS_MODEL");
         if (envUrl != null && !envUrl.isBlank() && envKey != null && !envKey.isBlank()
                 && envModel != null && !envModel.isBlank()) {
-            System.setProperty("spring.ai.openai.base-url", envUrl);
             System.setProperty("spring.ai.openai.responses.base-url", envUrl);
             System.setProperty("spring.ai.openai.api-key", envKey);
-            System.setProperty("spring.ai.openai.chat.options.model", envModel);
             System.setProperty("spring.ai.openai.responses.model", envModel);
             return;
         }
@@ -146,7 +142,7 @@ public class DlcSetup {
         writer.write("# Polar 配置\n");
         writer.write("# 由 /config 命令生成，可直接编辑后重启生效。\n");
         writer.write("#\n");
-        writeField(writer, config, KEY_BASE_URL, "Responses API 服务地址前缀，代码会在末尾请求 /responses");
+        writeField(writer, config, KEY_BASE_URL, "仅支持 Responses API；填写服务地址前缀，代码会在末尾请求 /responses，不支持 Chat Completions");
         writeField(writer, config, KEY_API_KEY, "API 密钥，保存后本文件权限收紧为仅当前用户可读写");
         writeField(writer, config, KEY_MODEL, "使用的模型名称");
         writer.write("\n# ── 子 Agent（Sub Agent）──\n");
@@ -193,6 +189,7 @@ public class DlcSetup {
         System.out.println(ANSI_CYAN + "  ║        POLAR - 初始化设置                ║" + ANSI_RESET);
         System.out.println(ANSI_CYAN + "  ╚══════════════════════════════════════╝" + ANSI_RESET);
         System.out.println();
+        System.out.println(ANSI_YELLOW + "  DLC 当前仅支持 OpenAI Responses API，不支持 Chat Completions API。" + ANSI_RESET);
         System.out.println(ANSI_DIM + "  Configure your LLM API connection." + ANSI_RESET);
         System.out.println(ANSI_DIM + "  Config will be saved to: " + CONFIG_FILE + ANSI_RESET);
         System.out.println(ANSI_DIM + "  You can reconfigure later with /config command." + ANSI_RESET);
@@ -201,9 +198,9 @@ public class DlcSetup {
         // API Base URL (required)
         String currentUrl = existing.getProperty(KEY_BASE_URL, "");
         String baseUrl = promptRequired(console, reader,
-                "API Base URL",
+                "Responses API Base URL",
                 currentUrl,
-                "Responses API base URL, e.g. https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1");
+                "仅填写 Responses API 地址前缀（例如 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1），程序会自动请求 /responses；不要填写 Chat Completions 地址或 /responses 路径。");
 
         // API Key (required)
         String currentKey = existing.getProperty(KEY_API_KEY, "");
@@ -326,14 +323,12 @@ public class DlcSetup {
         String model = config.getProperty(KEY_MODEL);
 
         if (baseUrl != null && !baseUrl.isBlank()) {
-            System.setProperty("spring.ai.openai.base-url", baseUrl);
             System.setProperty("spring.ai.openai.responses.base-url", baseUrl);
         }
         if (apiKey != null && !apiKey.isBlank()) {
             System.setProperty("spring.ai.openai.api-key", apiKey);
         }
         if (model != null && !model.isBlank()) {
-            System.setProperty("spring.ai.openai.chat.options.model", model);
             System.setProperty("spring.ai.openai.responses.model", model);
         }
         applySubagentToSystemProperties(config);
